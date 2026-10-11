@@ -1739,6 +1739,12 @@ blockquote {
 	border-bottom: 0;
 }
 
+/* A short table that only overflows because of the default column width. */
+.md-content table.compact-table th,
+.md-content table.compact-table td {
+	min-width: 0;
+}
+
 /* A reference table with too many columns for a phone: each row becomes a card,
    every cell carrying its column heading from data-label. */
 @media (max-width: 740px) {
@@ -1783,6 +1789,17 @@ blockquote {
 		letter-spacing: 0.06em;
 		text-transform: uppercase;
 		color: var(--muted);
+	}
+
+	/* Long cell text: heading above the value rather than beside it. */
+	.md-content table.stack-table-long td {
+		display: block;
+		text-align: left;
+	}
+
+	.md-content table.stack-table-long td::before {
+		display: block;
+		margin-bottom: 2px;
 	}
 
 	.md-content table.stack-table tr:last-child td {
