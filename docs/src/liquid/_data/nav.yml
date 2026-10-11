@@ -226,13 +226,35 @@ sections:
         url: /hive/review-samples/
 
   - id: lab
-    title: Lab
+    title: Design and research
     url: /lab/
-    description: Research, experiments, and contributor references — model performance, deployment paths, hardware benchmarks, shared visual language.
+    description: How the machine is designed and why, what is connected to what, tested variants, and the research behind it.
     pages:
       - title: Overview
         url: /lab/
+      - title: How the sorter is put together
+        url: /lab/sorter/
+      - title: Design intentions for the printed parts
+        url: /lab/printed-parts/
+      - title: How to contribute
+        url: /lab/contribute/
     groups:
+      - title: Electronics
+        pages:
+          - title: How the electronics talk to each other
+            url: /lab/electronics/
+          - title: What is connected to the Orange Pi
+            url: /lab/orange-pi/
+          - title: What is connected to the Pico
+            url: /lab/pico/
+          - title: The USB connections and the hub
+            url: /lab/usb/
+          - title: The motors
+            url: /lab/motors/
+          - title: The servos and the layer adapter boards
+            url: /lab/servos/
+          - title: Power distribution
+            url: /lab/power/
       - title: Object Detection Research
         pages:
           - title: Overview
@@ -243,3 +265,7 @@ sections:
             url: /lab/object-detection/device-benchmarking/
           - title: Hailo HEF Workflow
             url: /lab/object-detection/hailo-hef-workflow/
+      - title: Variants
+        pages:
+          - title: Tested variants
+            url: /lab/variants/
