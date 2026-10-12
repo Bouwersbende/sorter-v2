@@ -9,7 +9,6 @@ lede: The board that drives the servo.
 permalink: /hardware/assembly/distribution/chute/pcb/
 author: spencer
 contributors: [barthel]
-last_verified: 2026-09-07
 tools_needed: ["Hex key, 2 mm for a button head or 2.5 mm for a socket head"]
 parts_needed:
   - part: layer-adapter-board-basically
@@ -18,6 +17,11 @@ parts_needed:
     qty: 1
   - part: scr-m3-6-bhcs
     qty: 4
+warning: >-
+  **AI-generated first draft, step 1 only.** The board now sits on the new core, and where its four
+  inserts are comes from the 3D part of the inverted chute, not from a build. Steps 2 and 3, the
+  ribbon sockets and the servo header, are carried over from the earlier chute, where they were built
+  and checked.
 ---
 
 Each layer carries one basically Layer Adapter Board, the in-house board that breaks out the control board's ribbon connectors for that distribution layer and drives the layer's servo. One per layer.
@@ -26,8 +30,19 @@ The fasteners and quantities are in the parts list above and are called out inli
 
 {% include fastener-legend.html %}
 
-- The 4 M3 inserts the board sits on are part of the [chute core]({{ '/hardware/assembly/distribution/chute/chute-core/' | relative_url }})'s 18, not extra ones.
+- The 4 M3 inserts the board sits on are part of the [chute core]({{ '/hardware/assembly/distribution/chute/chute-core/' | relative_url }})'s 21, not extra ones. They are the four in a square on the rear wall.
 - The board is the only thing on the chute that uses a {% include fastener.html size="M3" variant="socket-button" length="6" %} screw.
+
+<div class="prep-item">
+  <div class="prep-item-body">
+    <p><strong>Build a <a href="{{ '/hardware/assembly/distribution/chute/chute-core/' | relative_url }}">chute core</a> before you start.</strong> Press all its heat inserts in first.</p>
+    <p>Which wall is which: the <strong>opening side</strong> has the big opening, the <strong>rear</strong> is opposite it, and of the two long walls the <strong>servo side</strong> is the one with nine inserts and the <strong>plain side</strong> the one with six.</p>
+  </div>
+  <figure class="prep-item-figure">
+    <img class="doc-figure" src="https://assets.basically.website/sorter-docs/chute-v3-core-with-inserts-opening-side-full-1961b4bfcb14.png" alt="Render of the finished chute core, an upright box open at the top with an opening in one side and brass heat inserts in its walls">
+    <figcaption>The prepared chute core, with its heat inserts in. <cite>Rendered from the part geometry, not from a build. Render: Balloon.</cite></figcaption>
+  </figure>
+</div>
 
 {% include step.html n="1" title="Screw the board onto the chute core" %}
 
@@ -36,11 +51,11 @@ The fasteners and quantities are in the parts list above and are called out inli
   <p>Static caution: this is a bare board. Touch a grounded metal surface before handling it, and handle it by its edges, avoiding the connectors and components.</p>
 </div>
 
-Seat it over the four inserts and fasten it with 4 {% include fastener.html size="M3" variant="socket-button" length="6" %} screws. Do not overtighten.
+Seat it over the four inserts with the `J5` servo header, the three pins, towards the servo side of the core, the side the servo is on. Fasten it with 4 {% include fastener.html size="M3" variant="socket-button" length="6" %} screws. Do not overtighten.
 
 <figure>
-  <img class="doc-figure" src="https://assets.basically.website/sorter-parts/chute-core-inserts-v3-rear-full-ad4c2cc7869c.png" alt="Close render of the rear end of the chute core with the four heat inserts the layer adapter board screws into circled in red">
-  <figcaption>The four inserts the board sits on, all on the panel at the top end of the chute core's rear face. <cite>Render: Balloon.</cite></figcaption>
+  <img class="doc-figure" src="https://assets.basically.website/sorter-docs/chute-v3-core-pockets-rear-full-1ca6422e7957.png" alt="Render of the rear wall of the chute core with the four heat inserts the layer adapter board screws into ringed in red">
+  <figcaption>The four inserts the board sits on, in a square on the chute core's rear wall, the one opposite the opening. <cite>Rendered from the part geometry, not from a build. Render: Balloon.</cite></figcaption>
 </figure>
 
 {% include step.html n="2" title="Connect the ribbon cables (RIB1, RIB2)" %}
