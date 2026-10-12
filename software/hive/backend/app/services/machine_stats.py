@@ -31,7 +31,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.database import SessionLocal
+from app.database import SessionLocal, tune_for_aggregates
 from app.models.machine import Machine
 from app.models.machine_piece import MachinePiece
 from app.models.machine_stats_cache import MachineStatsCache
@@ -57,6 +57,10 @@ _NUMERIC_FIELDS = (
     "ontime_pct",
     "total_samples",
     "accepted_samples",
+    "unreviewed_samples",
+    "in_review_samples",
+    "rejected_samples",
+    "conflict_samples",
     "total_sessions",
     "parts_found",
     "parts_needed",
@@ -224,6 +228,10 @@ def _compute_sample_stats(db: Session, machine_ids: list[Any] | None = None) -> 
             Sample.machine_id,
             func.count(Sample.id).label("total_samples"),
             func.count(Sample.id).filter(Sample.review_status == "accepted").label("accepted_samples"),
+            func.count(Sample.id).filter(Sample.review_status == "unreviewed").label("unreviewed_samples"),
+            func.count(Sample.id).filter(Sample.review_status == "in_review").label("in_review_samples"),
+            func.count(Sample.id).filter(Sample.review_status == "rejected").label("rejected_samples"),
+            func.count(Sample.id).filter(Sample.review_status == "conflict").label("conflict_samples"),
             func.min(Sample.captured_at).label("first_capture"),
             func.max(Sample.captured_at).label("last_capture"),
         ),
@@ -237,6 +245,27 @@ def _compute_sample_stats(db: Session, machine_ids: list[Any] | None = None) -> 
     ).group_by(UploadSession.machine_id).all()
     session_map = {str(r.machine_id): r.total_sessions for r in session_rows}
 
+    # The sources and capture reasons the Channel samples filters offer, with
+    # their counts, per machine; archived samples are not offered.
+    source_rows = _scoped(
+        db.query(Sample.machine_id, Sample.source_role, func.count(Sample.id))
+        .filter(Sample.archived_at.is_(None), Sample.source_role.isnot(None)),
+        Sample.machine_id,
+    ).group_by(Sample.machine_id, Sample.source_role).all()
+    reason_rows = _scoped(
+        db.query(Sample.machine_id, Sample.capture_reason, func.count(Sample.id))
+        .filter(Sample.archived_at.is_(None), Sample.capture_reason.isnot(None)),
+        Sample.machine_id,
+    ).group_by(Sample.machine_id, Sample.capture_reason).all()
+    sources: dict[str, dict[str, int]] = {}
+    reasons: dict[str, dict[str, int]] = {}
+    for mid, value, count in source_rows:
+        if value:
+            sources.setdefault(str(mid), {})[value] = int(count)
+    for mid, value, count in reason_rows:
+        if value:
+            reasons.setdefault(str(mid), {})[value] = int(count)
+
     progress_rows = _scoped(
         db.query(
             MachineSetProgress.machine_id,
@@ -248,18 +277,24 @@ def _compute_sample_stats(db: Session, machine_ids: list[Any] | None = None) -> 
     progress_map = {str(r.machine_id): r for r in progress_rows}
 
     result: dict[str, dict[str, Any]] = {}
-    keys = set(sample_map) | set(session_map) | set(progress_map)
+    keys = set(sample_map) | set(session_map) | set(progress_map) | set(sources) | set(reasons)
     for mid in keys:
         sr = sample_map.get(mid)
         pr = progress_map.get(mid)
         result[mid] = {
             "total_samples": sr.total_samples if sr else 0,
             "accepted_samples": sr.accepted_samples if sr else 0,
+            "unreviewed_samples": sr.unreviewed_samples if sr else 0,
+            "in_review_samples": sr.in_review_samples if sr else 0,
+            "rejected_samples": sr.rejected_samples if sr else 0,
+            "conflict_samples": sr.conflict_samples if sr else 0,
             "first_capture": sr.first_capture if sr else None,
             "last_capture": sr.last_capture if sr else None,
             "total_sessions": session_map.get(mid, 0),
             "parts_found": int(pr.parts_found) if pr and pr.parts_found else 0,
             "parts_needed": int(pr.parts_needed) if pr and pr.parts_needed else 0,
+            "sample_sources": sources.get(mid, {}),
+            "sample_capture_reasons": reasons.get(mid, {}),
         }
     return result
 
@@ -285,7 +320,12 @@ def compute_stats(db: Session, machine_ids: list[Any] | None = None) -> dict[str
         stats = _empty_stats()
         stats.update(piece_stats.get(mid_str, {}))
         stats.update(sample_stats.get(mid_str, {}))
-        stats["distributions"] = distributions.get(mid_str, _empty_distributions())
+        stats["distributions"] = {
+            **distributions.get(mid_str, _empty_distributions()),
+            # Kept beside the piece maps; the analytics fold reads only those.
+            "sample_sources": stats.pop("sample_sources", {}),
+            "sample_capture_reasons": stats.pop("sample_capture_reasons", {}),
+        }
         merged[mid_str] = stats
     return merged
 
@@ -388,6 +428,9 @@ def refresh_all(db: Session) -> int:
 def _refresh_pass() -> dict[str, Any]:
     db = SessionLocal()
     try:
+        # Grouped passes over every piece and sample: give them room to sort in
+        # memory rather than spill to temp files.
+        tune_for_aggregates(db, work_mem="64MB")
         return {"last_run_machines": refresh_all(db)}
     except Exception:
         db.rollback()

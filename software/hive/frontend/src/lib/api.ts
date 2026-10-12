@@ -443,6 +443,8 @@ export interface Sample {
 	luminance_mean: number | null;
 	clipped_low_ratio: number | null;
 	clipped_high_ratio: number | null;
+	// Straight from storage when Hive can sign one (list responses).
+	thumb_url?: string | null;
 }
 
 export interface SampleMachineSummary {
@@ -520,6 +522,32 @@ export interface PaginatedSamples {
 	pages: number;
 }
 
+// One page of the samples list, newest first; pass next_cursor back as cursor.
+export interface SamplePage {
+	items: Sample[];
+	next_cursor: string | null;
+	has_more: boolean;
+}
+
+// The Channel samples filters, as the list, the review queue, the batch
+// actions and a teacher re-run all take them.
+export interface SampleFilterParams {
+	scope?: 'mine' | 'all' | string;
+	machine_ids?: string[];
+	upload_session_id?: string;
+	source_role?: string;
+	capture_reason?: string;
+	review_status?: string;
+	kind?: 'regular' | 'condition' | 'all' | string;
+	my_review?: 'unreviewed' | 'reviewed' | 'accepted' | 'rejected' | string;
+	annotated?: 'teacher' | 'raw' | 'all' | string;
+	exposure?: 'under' | 'normal' | 'over' | string;
+	archived?: 'active' | 'archived' | 'all' | string;
+	max_age_hours?: number | string;
+	// The review queue: samples I have not reviewed that still need reviews.
+	needs_review?: boolean;
+}
+
 export interface SampleFilterOptions {
 	source_roles: string[];
 	source_role_counts?: Record<string, number>;
@@ -585,6 +613,8 @@ export interface StatsOverview {
 	rejected_samples: number;
 	conflict_samples: number;
 	total_machines: number;
+	// When the oldest of the cached per-machine counts behind these was made.
+	computed_at: string | null;
 }
 
 export type OAuthProviderName = 'github' | 'discord';
@@ -1215,6 +1245,26 @@ function resolveImagePath(path: string): string {
 	return resolveApiPath(`${path}${sep}cb=${IMAGE_CACHE_BUST}`);
 }
 
+// `?machine_id=a&machine_id=b`: the machine filter, one machine or several.
+function machineQuery(ids: string[] | undefined): string {
+	const sp = new URLSearchParams();
+	for (const id of ids ?? []) sp.append('machine_id', id);
+	const qs = sp.toString();
+	return qs ? `?${qs}` : '';
+}
+
+// A filter body without empty values, so the server sees None and not ''
+// (which would match nothing) or an empty machine list.
+function filterBody(payload: object): Record<string, unknown> {
+	const body: Record<string, unknown> = {};
+	for (const [key, val] of Object.entries(payload)) {
+		if (val === undefined || val === null || val === '') continue;
+		if (Array.isArray(val) && val.length === 0) continue;
+		body[key] = val;
+	}
+	return body;
+}
+
 function getCsrfToken(): string | null {
 	const match = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]*)/);
 	return match ? decodeURIComponent(match[1]) : null;
@@ -1476,22 +1526,28 @@ export interface ColorLabelPieceCard {
 	seen_at: string | null;
 	color_label_count: number;
 	crop_link_count: number;
+	part_label_count: number;
 	my_color: boolean;
 	my_crop: boolean;
+	my_part: boolean;
 	has_candidates: boolean;
 	thumb_seq: number | null;
+	// Straight from storage when Hive can sign one; else load the thumbnail by thumb_seq.
+	thumb_url: string | null;
 }
 
 export interface ColorLabelPiecesPage {
 	items: ColorLabelPieceCard[];
 	has_more: boolean;
-	offset: number;
+	// Pass as `cursor` for the page after this one; null at the end of the list.
+	next_cursor: string | null;
 	sort: ColorLabelSort;
 }
 
 export interface MachineLabeledPiece {
 	piece_uuid: string;
 	thumb_seq: number | null;
+	thumb_url: string | null;
 	color_id: number;
 	color_name: string;
 	rgb: string | null;
@@ -1667,26 +1723,11 @@ export const IMAGE_QUALITY_REASONS: { code: ImageQualityReason; label: string }[
 
 export interface ColorLabelQueueImage extends ImageQualityFlags {
 	seq: number;
+	// Straight from storage when Hive can sign one; else load colorLabelImageUrl.
+	url: string | null;
 	source: string | null;
 	used: boolean;
 	score: number | null;
-}
-
-export interface ColorLabelQueueItem {
-	machine_id: string;
-	machine_name: string | null;
-	piece_uuid: string;
-	recorded_at: string | null;
-	seen_at: string | null;
-	part: { part_id: string | null; part_name: string | null };
-	pixel_guess: ColorLabelPixelGuess | null;
-	images: ColorLabelQueueImage[];
-	my_label: { color_id: number | null; notes: string | null } | null;
-}
-
-export interface ColorLabelQueue {
-	items: ColorLabelQueueItem[];
-	has_more: boolean;
 }
 
 export interface ColorModel {
@@ -1863,6 +1904,8 @@ export interface PossibleCropCandidate extends ImageQualityFlags {
 	model_same: boolean | null;
 	model_score: number | null;
 	available: boolean;
+	// Straight from storage when Hive can sign one; else load channelCropLabelImageUrl.
+	thumb_url: string | null;
 }
 
 export interface PieceCropLinkMember {
@@ -1880,6 +1923,8 @@ export interface PossibleCropsResult {
 	ai_reasoning: string | null;
 	// Name of the active link matcher model when prediction_source === 'model'.
 	link_model: string | null;
+	// The score at or above which the link model counts a crop as the same piece.
+	link_threshold: number | null;
 	// Present only on the ai-predict POST response.
 	ai_cost_usd?: number | null;
 	ai_elapsed_ms?: number | null;
@@ -2008,36 +2053,26 @@ export const api = {
 	colorLabelColors() {
 		return request<{ results: BrickLinkColor[] }>('GET', '/api/labeling/colors');
 	},
-	colorLabelStats(opts: { machineId?: string | null } = {}) {
-		const qs = opts.machineId ? `?machine_id=${opts.machineId}` : '';
-		return request<ColorLabelStats>('GET', `/api/labeling/stats${qs}`);
+	colorLabelStats(opts: { machineIds?: string[] } = {}) {
+		return request<ColorLabelStats>('GET', `/api/labeling/stats${machineQuery(opts.machineIds)}`);
 	},
-	colorCoverage(opts: { machineId?: string | null } = {}) {
-		const qs = opts.machineId ? `?machine_id=${opts.machineId}` : '';
-		return request<ColorCoverageResponse>('GET', `/api/labeling/color-coverage${qs}`);
-	},
-	colorLabelQueue(opts: { onlyUnlabeled?: boolean; limit?: number; offset?: number } = {}) {
-		const params = new URLSearchParams();
-		if (opts.onlyUnlabeled === false) params.set('only_unlabeled', 'false');
-		if (opts.limit) params.set('limit', String(opts.limit));
-		if (opts.offset) params.set('offset', String(opts.offset));
-		const qs = params.toString();
-		return request<ColorLabelQueue>('GET', `/api/labeling/queue${qs ? `?${qs}` : ''}`);
+	colorCoverage(opts: { machineIds?: string[] } = {}) {
+		return request<ColorCoverageResponse>('GET', `/api/labeling/color-coverage${machineQuery(opts.machineIds)}`);
 	},
 	colorLabelPieces(
 		opts: {
 			sort?: ColorLabelSort;
 			limit?: number;
-			offset?: number;
-			machineId?: string | null;
+			cursor?: string | null;
+			machineIds?: string[];
 			withCandidates?: boolean;
 		} = {}
 	) {
 		const params = new URLSearchParams();
 		if (opts.sort) params.set('sort', opts.sort);
 		if (opts.limit) params.set('limit', String(opts.limit));
-		if (opts.offset) params.set('offset', String(opts.offset));
-		if (opts.machineId) params.set('machine_id', opts.machineId);
+		if (opts.cursor) params.set('cursor', opts.cursor);
+		for (const id of opts.machineIds ?? []) params.append('machine_id', id);
 		if (opts.withCandidates) params.set('with_candidates', 'true');
 		const qs = params.toString();
 		return request<ColorLabelPiecesPage>('GET', `/api/labeling/pieces${qs ? `?${qs}` : ''}`);
@@ -2284,30 +2319,17 @@ export const api = {
 	},
 
 	// Samples
-	getSamples(params: {
-		page?: number;
-		page_size?: number;
-		machine_id?: string;
-		upload_session_id?: string;
-		source_role?: string;
-		capture_reason?: string;
-		review_status?: string;
-		kind?: 'regular' | 'condition' | 'all' | string;
-		my_review?: 'unreviewed' | 'reviewed' | 'accepted' | 'rejected' | string;
-		annotated?: 'teacher' | 'raw' | 'all' | string;
-		exposure?: 'under' | 'normal' | 'over' | string;
-		archived?: 'active' | 'archived' | 'all' | string;
-		max_age_hours?: number | string;
-		scope?: 'mine' | 'all' | string;
-	} = {}) {
+	getSamples(params: SampleFilterParams & { cursor?: string | null; limit?: number } = {}) {
 		const searchParams = new URLSearchParams();
 		for (const [key, val] of Object.entries(params)) {
-			if (val !== undefined && val !== null && val !== '') {
+			if (key === 'machine_ids') {
+				for (const id of (val as string[] | undefined) ?? []) searchParams.append('machine_id', id);
+			} else if (val !== undefined && val !== null && val !== '' && val !== false) {
 				searchParams.set(key, String(val));
 			}
 		}
 		const qs = searchParams.toString();
-		return request<PaginatedSamples>('GET', `/api/samples${qs ? '?' + qs : ''}`);
+		return request<SamplePage>('GET', `/api/samples${qs ? '?' + qs : ''}`);
 	},
 	getSampleFilterOptions(params: { scope?: 'mine' | 'all' | string } = {}) {
 		const qs = params.scope ? `?scope=${params.scope}` : '';
@@ -2350,25 +2372,8 @@ export const api = {
 	deleteSample(id: string) {
 		return request<void>('DELETE', `/api/samples/${id}`);
 	},
-	batchDeleteSamples(payload: {
-		machine_id?: string;
-		source_role?: string;
-		capture_reason?: string;
-		review_status?: string;
-		kind?: 'regular' | 'condition' | 'all' | string;
-		my_review?: 'unreviewed' | 'reviewed' | 'accepted' | 'rejected' | string;
-		annotated?: 'teacher' | 'raw' | 'all' | string;
-		exposure?: 'under' | 'normal' | 'over' | string;
-		max_age_hours?: number | string;
-		dry_run?: boolean;
-		max_delete?: number;
-	}) {
-		// Strip empty values so the server sees None instead of '' (which would
-		// otherwise filter against empty strings and match nothing).
-		const body: Record<string, unknown> = {};
-		for (const [key, val] of Object.entries(payload)) {
-			if (val !== undefined && val !== null && val !== '') body[key] = val;
-		}
+	batchDeleteSamples(payload: SampleFilterParams & { dry_run?: boolean; max_delete?: number }) {
+		const body = filterBody(payload);
 		return request<{
 			ok: boolean;
 			matched: number;
@@ -2378,25 +2383,10 @@ export const api = {
 		}>('POST', '/api/samples/batch-delete', body);
 	},
 	batchArchiveSamples(
-		payload: {
-			machine_id?: string;
-			source_role?: string;
-			capture_reason?: string;
-			review_status?: string;
-			kind?: 'regular' | 'condition' | 'all' | string;
-			my_review?: 'unreviewed' | 'reviewed' | 'accepted' | 'rejected' | string;
-			annotated?: 'teacher' | 'raw' | 'all' | string;
-			exposure?: 'under' | 'normal' | 'over' | string;
-			max_age_hours?: number | string;
-			dry_run?: boolean;
-			max_archive?: number;
-		},
+		payload: SampleFilterParams & { dry_run?: boolean; max_archive?: number },
 		mode: 'archive' | 'unarchive' = 'archive'
 	) {
-		const body: Record<string, unknown> = {};
-		for (const [key, val] of Object.entries(payload)) {
-			if (val !== undefined && val !== null && val !== '') body[key] = val;
-		}
+		const body = filterBody(payload);
 		const path = mode === 'archive' ? '/api/samples/batch-archive' : '/api/samples/batch-unarchive';
 		return request<{
 			ok: boolean;
@@ -2420,32 +2410,6 @@ export const api = {
 	},
 
 	// Review
-	getNextReview(
-		params: {
-			scope?: 'mine' | 'all' | string;
-			machine_id?: string;
-			source_role?: string;
-			capture_reason?: string;
-			kind?: 'regular' | 'condition' | 'all' | string;
-			review_status?: 'unreviewed' | 'in_review' | 'accepted' | 'rejected' | 'conflict' | string;
-			my_review?: 'unreviewed' | 'reviewed' | 'accepted' | 'rejected' | string;
-			annotated?: 'teacher' | 'raw' | 'all' | string;
-			max_age_hours?: number | string;
-		} = {},
-		excludeIds: string[] = []
-	) {
-		const sp = new URLSearchParams();
-		for (const [key, val] of Object.entries(params)) {
-			if (val !== undefined && val !== null && val !== '') {
-				sp.set(key, String(val));
-			}
-		}
-		for (const id of excludeIds) {
-			sp.append('exclude_id', id);
-		}
-		const qs = sp.toString();
-		return request<Sample | null>('GET', `/api/review/queue/next${qs ? '?' + qs : ''}`);
-	},
 	submitReview(sampleId: string, decision: 'accept' | 'reject', notes?: string) {
 		return request<SampleReview>('POST', `/api/review/samples/${sampleId}`, { decision, notes });
 	},
@@ -2802,9 +2766,12 @@ export const api = {
 	},
 
 	// Stats
-	getOverview(params: { scope?: 'mine' | 'all' | string } = {}) {
-		const qs = params.scope ? `?scope=${params.scope}` : '';
-		return request<StatsOverview>('GET', `/api/stats/overview${qs}`);
+	getOverview(params: { scope?: 'mine' | 'all' | string; machineIds?: string[] } = {}) {
+		const sp = new URLSearchParams();
+		if (params.scope) sp.set('scope', params.scope);
+		for (const id of params.machineIds ?? []) sp.append('machine_id', id);
+		const qs = sp.toString();
+		return request<StatsOverview>('GET', `/api/stats/overview${qs ? `?${qs}` : ''}`);
 	},
 
 	// API keys (personal access tokens)
@@ -3052,7 +3019,7 @@ export interface PaginatedDetectionModels {
 
 export interface TeacherJobFilter {
 	scope?: string;
-	machine_id?: string;
+	machine_ids?: string[];
 	upload_session_id?: string;
 	source_role?: string;
 	capture_reason?: string;
