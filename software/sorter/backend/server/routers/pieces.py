@@ -266,8 +266,8 @@ class ColorsResponse(BaseModel):
 
 @router.get("/api/pieces/colors", response_model=ColorsResponse)
 def getPieceColors() -> ColorsResponse:
-    # BrickLink color palette for the correction dropdown (searchable list of all
-    # LEGO colors). Fetched from Hive; empty when Hive is unavailable.
+    # The BrickLink palette a piece's true color is picked from: Hive's, or the
+    # copy saved the last time Hive answered; empty only if it never has.
     import hive_metadata
 
     gc = shared_state.gc_ref
@@ -416,6 +416,67 @@ def listPieces(
     )
 
 
+def _isColorId(value: Any) -> bool:
+    # A BrickLink color id ("11"), not the "any_color" sentinel a piece carries
+    # when no color was predicted.
+    return isinstance(value, str) and value.isdigit() and int(value) > 0
+
+
+def _colorPredictionsForPiece(gc: Any, uuid: str) -> tuple[Optional[str], List[tuple[int, Optional[float]]]]:
+    """(part id, [(BrickLink color id, score)]) for a piece: every color its
+    classification requests ranked (see piece_predictions), else the color it
+    was given and that color's confidence. From memory while the piece
+    is live, else from disk. 404 when the piece is unknown."""
+    import piece_predictions
+    import piece_records
+
+    payload = None
+    if gc is not None and getattr(gc, "runtime_stats", None) is not None:
+        payload = gc.runtime_stats.lookupKnownObject(uuid)
+    source = payload if payload is not None else piece_records.getPieceSummaryByUuid(gc, uuid)
+    if source is None:
+        raise HTTPException(status_code=404, detail="not found")
+    part_id = source.get("part_id")
+    part_id = part_id if isinstance(part_id, str) and part_id else None
+
+    # Every request's colors, each color at its best score, as Hive's piece
+    # panel reads the same rows.
+    rows = piece_predictions.recent(uuid) or piece_predictions.listForPiece(uuid)
+    best: Dict[int, Optional[float]] = {}
+    for r in rows:
+        if r["kind"] != piece_predictions.KIND_COLOR or not _isColorId(r["value_id"]):
+            continue
+        score = float(r["score"]) if isinstance(r["score"], (int, float)) else None
+        color = int(r["value_id"])
+        before = best.get(color)
+        best[color] = score if before is None else before if score is None else max(before, score)
+    if best:
+        return part_id, sorted(best.items(), key=lambda item: -(item[1] or 0.0))
+
+    color_id = source.get("color_id")
+    confidence = source.get("color_confidence")
+    predictions: List[tuple[int, Optional[float]]] = []
+    if _isColorId(color_id):
+        score = float(confidence) if isinstance(confidence, (int, float)) else None
+        predictions.append((int(color_id), score))
+    return part_id, predictions
+
+
+@router.get("/api/pieces/{uuid}/likely-colors")
+def getPieceLikelyColors(uuid: str) -> Dict[str, Any]:
+    # Every color ranked for this piece, for the "No, pick the color" list:
+    # Hive's ranking (closeness to the prediction times how likely the part
+    # exists in that color on BrickLink), or by color alone when Hive cannot
+    # answer (`fallback` says why).
+    import hive_metadata
+
+    gc = shared_state.gc_ref
+    if gc is None:
+        raise HTTPException(status_code=503, detail="not ready")
+    part_id, predictions = _colorPredictionsForPiece(gc, uuid)
+    return hive_metadata.getLikelyColors(gc, part_id, predictions)
+
+
 class CorrectionRequest(BaseModel):
     # Fields present in the request body are applied; absent fields are left
     # unchanged (so the part check/x, the color dropdown, and the capture-issue
@@ -504,6 +565,8 @@ def submitPieceCorrection(uuid: str, body: CorrectionRequest) -> CorrectionRespo
     fields = body.model_fields_set
     set_part = "part_correct" in fields
     set_color = "color_corrected_id" in fields
+    if set_color and body.color_corrected_id is not None and not _isColorId(body.color_corrected_id):
+        raise HTTPException(status_code=400, detail="color_corrected_id must be a BrickLink color id")
     set_rejection_reasons = "rejection_reasons" in fields
     if set_part or set_color or set_rejection_reasons:
         piece_records.setPieceCorrection(
@@ -554,7 +617,7 @@ def submitPieceCorrection(uuid: str, body: CorrectionRequest) -> CorrectionRespo
             and ctx.get("color_corrected_id") is not None
             and not ctx.get("color_feedback_submitted")
             and ctx.get("brickognize_color_rank") is not None
-            and ctx.get("color_id")
+            and _isColorId(ctx.get("color_id"))
         ):
             try:
                 is_correct = str(ctx["color_corrected_id"]) == str(ctx["color_id"])
