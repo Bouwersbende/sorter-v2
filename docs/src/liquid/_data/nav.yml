@@ -189,6 +189,8 @@ sections:
             url: /sorter/safe-shutdown/
           - title: Troubleshooting
             url: /sorter/troubleshooting/
+          - title: Repair git and get on stable
+            url: /sorter/repair-git-get-on-stable/
       - title: Under the hood
         pages:
           - title: Dev flow
