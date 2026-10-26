@@ -63,6 +63,33 @@ def _tables(conn: sqlite3.Connection) -> None:
         "error TEXT, images_json TEXT NOT NULL, response_path TEXT, response_json TEXT, "
         "bytes INTEGER NOT NULL DEFAULT 0, evicted_at REAL)"
     )
+    # Early installations of this table predate storage accounting. CREATE
+    # TABLE IF NOT EXISTS does not add columns to those databases, so even the
+    # recording-health endpoint would fail before a new request was written.
+    previous_columns = {row[1] for row in conn.execute("PRAGMA table_info(investigation_requests)")}
+    db.add_columns(conn, "investigation_requests", {
+        "bytes": "INTEGER NOT NULL DEFAULT 0",
+        "evicted_at": "REAL",
+    })
+    if "bytes" not in previous_columns:
+        root = investigation_dir()
+        rows = conn.execute("SELECT id,images_json,response_path FROM investigation_requests").fetchall()
+        for row in rows:
+            try:
+                images = json.loads(row["images_json"])
+            except (TypeError, ValueError):
+                images = []
+            paths = [item.get("path") if isinstance(item, dict) else item for item in images]
+            paths.append(row["response_path"])
+            used = 0
+            for relative in paths:
+                if not isinstance(relative, str):
+                    continue
+                try:
+                    used += (root / relative).stat().st_size
+                except OSError:
+                    pass
+            conn.execute("UPDATE investigation_requests SET bytes=? WHERE id=?", (used, row["id"]))
     conn.execute("CREATE INDEX IF NOT EXISTS idx_investigation_requests_piece ON investigation_requests(piece_uuid, started_at)")
 
 

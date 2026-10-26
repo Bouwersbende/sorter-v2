@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import queue
+import sqlite3
 import time
 from types import SimpleNamespace
 
@@ -164,3 +165,27 @@ def test_complete_simulated_piece_trace_and_search(tmp_path, monkeypatch):
     }
     assert trace["physical_position"] is None
     assert [row["uuid"] for row in router.search(refused_motor_command=True)["pieces"]] == ["piece-trace"]
+
+
+def test_existing_request_table_gets_storage_columns_and_preserves_evidence(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_STATE_DB_PATH", str(tmp_path / "state.sqlite"))
+    image = tmp_path / "machine_investigation" / "requests" / "legacy-piece" / "image.jpg"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"legacy-jpeg")
+    with sqlite3.connect(tmp_path / "state.sqlite") as conn:
+        conn.execute(
+            "CREATE TABLE investigation_requests (id TEXT PRIMARY KEY, piece_uuid TEXT NOT NULL, "
+            "run_id TEXT, label TEXT, started_at REAL NOT NULL, ended_at REAL NOT NULL, "
+            "status_code INTEGER, error TEXT, images_json TEXT NOT NULL, response_path TEXT, response_json TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO investigation_requests "
+            "(id,piece_uuid,started_at,ended_at,images_json) VALUES(?,?,?,?,?)",
+            ("legacy-request", "legacy-piece", time.time(), time.time(),
+             '[{"path":"requests/legacy-piece/image.jpg"}]'),
+        )
+    assert evidence.status()["request_bytes"] == len(b"legacy-jpeg")
+    assert evidence.request_image_bytes("legacy-request", 0) == b"legacy-jpeg"
+    with evidence._connection() as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(investigation_requests)")}
+    assert {"bytes", "evicted_at"} <= columns
