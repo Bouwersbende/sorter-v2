@@ -102,6 +102,63 @@ On startup the client will:
 3. Aggregate stepper and servo actuators across all discovered boards
 4. Bind actuators to logical roles (carousel, chute, rotors) using firmware-reported names
 
+## Machine investigation
+
+The **Machine investigation** page in the Sorter UI records the classification
+camera whenever the controller is sorting. It uses the camera's existing
+capture thread; it does not open another USB camera connection. The recordings
+are timestamp-indexed JPEG frames in rotating `.mjpg` segments, played by the
+page's frame viewer. The recorder thread scales each frame to fit within
+960 × 540 pixels and encodes it at JPEG quality 65 by default. This affects
+only the investigation video; the camera feed and exact images submitted to
+Brickognize keep their original quality.
+The page shows recording gaps and dropped frames rather than repeating a frame
+as if it were a new observation.
+
+All local evidence is under `sorter/backend/machine_investigation/` beside
+`local_state.sqlite` (or beside `LOCAL_STATE_DB_PATH` when that is set). The
+SQLite database contains frame offsets, piece events, and request metadata.
+The `requests/` directory contains the exact JPEGs submitted to Brickognize
+and its original response bodies. Neither authentication headers nor API keys
+are recorded. The stored response can include candidates the sorting pipeline
+later filtered out.
+
+The recorder starts automatically with the full backend (`./dev.sh backend` or
+`./dev.sh`) and writes frames only while sorting is running. The defaults are
+8 GiB for video, 1 GiB for Brickognize request files, and 30 days of age
+retention. The local `.env` can set `SORTER_INVESTIGATION_MAX_GB=50` to keep
+up to 50 GiB of video across backend restarts. Override the video size,
+quality, or limits before starting the backend:
+
+```bash
+SORTER_INVESTIGATION_MAX_GB=50 \
+SORTER_INVESTIGATION_VIDEO_MAX_WIDTH=960 \
+SORTER_INVESTIGATION_VIDEO_MAX_HEIGHT=540 \
+SORTER_INVESTIGATION_VIDEO_JPEG_QUALITY=65 \
+SORTER_INVESTIGATION_REQUEST_MAX_MB=2048 \
+SORTER_INVESTIGATION_RETENTION_DAYS=14 \
+./dev.sh backend
+```
+
+Disk use depends on scene detail, JPEG quality, and frame rate. For example,
+40 KiB per saved frame at 30 FPS is about 4 GiB per hour, so a 50 GiB video
+limit would hold roughly 12 hours; actual duration will vary. Recording health,
+current storage use, and dropped-frame counts appear at the top of the page.
+Oldest closed segments and request files are removed when their respective
+limits are exceeded; their absence is visible in the investigation page.
+If the disk fills, the recorder reports an error and retries in its own thread;
+the sorting control loop does not wait for video. A camera disconnect stops new
+frames, marks recording unhealthy after two seconds, and creates a gap event.
+When frames resume, the index continues at their actual capture timestamps.
+
+To inspect a piece, open **Bins**, open a bin, select a part/color group, then
+select its individual piece record. The link opens Machine investigation with
+that piece's classification, exact Brickognize input and response, routing
+decision, chute command and release timeline, and time-linked camera frames.
+The displayed chute angle is calculated from commanded steps. The machine has
+no independent angle sensor, so the page does not claim a measured physical
+position or a physically confirmed landing bin.
+
 **Windows**: Run PowerShell as Administrator to access serial ports.
 
 ---

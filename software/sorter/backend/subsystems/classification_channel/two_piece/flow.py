@@ -665,12 +665,21 @@ class TwoPieceClassificationChannel(Rev01BaseState):
             if tp is None:
                 tp = self._createPiece(tid, now)
                 created.append(tp)
+            previous_zone = tp.zone
             tp.zone = int(po.zone_code)
             b = po.bbox
             tp.bbox = (int(b[0]), int(b[1]), int(b[2]), int(b[3]))
             tp.boxes = merged.get(tp.bbox, (tp.bbox,))
             tp.gap_to_exit = po.com_forward_to_exit_deg
             tp.last_seen = now
+            if previous_zone != tp.zone and tp.known_object is not None:
+                import machine_investigation
+
+                machine_investigation.record_event("track_zone_changed", {
+                    "track_id": tid, "from_zone": previous_zone, "to_zone": tp.zone,
+                    "bbox": tp.bbox, "gap_to_exit_deg": tp.gap_to_exit,
+                }, piece_uuid=tp.known_object.uuid,
+                   at=float(getattr(state, "ts", 0.0)) or None)
             # Watchdog progress: the piece physically moved a substantial amount.
             if tp.gap_to_exit is not None:
                 gap = float(tp.gap_to_exit)
@@ -717,6 +726,11 @@ class TwoPieceClassificationChannel(Rev01BaseState):
         tp.worker.emitKnownObject()
         self.logger.info(f"{LOG_TAG} new piece track={tp.track_id} piece={obj.uuid}")
         _logC4Piece(tp.track_id, obj.uuid)
+        import machine_investigation
+
+        machine_investigation.record_event("track_assigned", {
+            "track_id": tp.track_id, "zone": tp.zone, "bbox": tp.bbox,
+        }, piece_uuid=obj.uuid)
 
     def _retireGonePieces(self, now: float) -> None:
         for tid in [
@@ -826,6 +840,12 @@ class TwoPieceClassificationChannel(Rev01BaseState):
             lost.worker.emitKnownObject()
         if obj is not None:
             _logC4Piece(lost.track_id, obj.uuid, took_over=old_tid)
+            import machine_investigation
+
+            machine_investigation.record_event("track_handover", {
+                "old_track_id": old_tid, "new_track_id": lost.track_id,
+                "zone": lost.zone, "bbox": lost.bbox,
+            }, piece_uuid=obj.uuid)
         self.logger.info(
             f"{LOG_TAG} track={old_tid} lost; track={lost.track_id} at its place takes it over"
         )
@@ -1193,6 +1213,12 @@ class TwoPieceClassificationChannel(Rev01BaseState):
                 ctx.capturing_started_at = now
                 obj = tp.known_object
                 self._cycles.confirmed(time.time(), tp.track_id, obj.uuid if obj is not None else None)
+                if obj is not None:
+                    import machine_investigation
+
+                    machine_investigation.record_event("capture_started", {
+                        "track_id": tp.track_id, "zone": tp.zone, "bbox": tp.bbox,
+                    }, piece_uuid=obj.uuid)
             self._cropBurstFrame(tp.worker, tp.bbox, perc_frame)
             done, reason = tp.worker.burstCaptureComplete(ctx, now)
             if done and self._landedTouching(tp):
@@ -1220,6 +1246,13 @@ class TwoPieceClassificationChannel(Rev01BaseState):
                     f"{LOG_TAG} captured track={tp.track_id} "
                     f"({len(caps)} crops, stop={reason}); classifying"
                 )
+                if tp.known_object is not None:
+                    import machine_investigation
+
+                    machine_investigation.record_event("capture_finished", {
+                        "track_id": tp.track_id, "crop_count": len(caps),
+                        "stop_reason": reason,
+                    }, piece_uuid=tp.known_object.uuid)
 
     def _applyResults(self, now: float) -> None:
         for tp in self._pieces.values():

@@ -62,6 +62,16 @@ class RunRecorder:
 
     def recordPiece(self, piece: KnownObject) -> None:
         self.pieces.append(piece)
+        import machine_investigation
+
+        machine_investigation.record_event("release_recorded", {
+            "destination_bin": list(piece.destination_bin) if piece.destination_bin else None,
+            "part_id": piece.part_id,
+            "color_id": piece.color_id,
+            "category_id": piece.category_id,
+            "classification_status": piece.classification_status.value,
+            "physical_bin_confirmation": None,
+        }, piece_uuid=piece.uuid, run_id=self.run_id, at=piece.distributed_at)
         # Durable the instant the piece commits, so a restart that skips save()
         # keeps it. Called on the control loop, so the write itself runs on the
         # database writer thread.

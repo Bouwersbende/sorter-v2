@@ -561,6 +561,16 @@ def main() -> None:
         pass
 
     camera_service.start()
+    try:
+        import machine_investigation
+
+        machine_investigation.start(
+            camera_service.get_capture_thread_for_role("classification_channel"),
+            gc.run_id,
+            gc.logger,
+        )
+    except Exception as exc:
+        gc.logger.warning(f"Failed to start machine investigation recording: {exc}")
     _startPerception(gc, irl_config, camera_service)
     # Mode-agnostic: the sample collector runs in every config, gated only by
     # its own enable toggle (persisted). Started after cameras so feeds exist.
@@ -862,6 +872,13 @@ def main() -> None:
             vision.stop()
         except Exception as exc:
             gc.logger.warning(f"Failed to stop vision during shutdown: {exc}")
+
+        try:
+            import machine_investigation
+
+            machine_investigation.stop()
+        except Exception as exc:
+            gc.logger.warning(f"Failed to stop machine investigation recording: {exc}")
 
         try:
             camera_service.stop()

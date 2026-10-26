@@ -137,16 +137,25 @@ class ProfileRouter:
         color_id: Optional[str],
         kit_is_full: Optional[Callable[[str, str, str], bool]] = None,
     ) -> str:
+        return self.route_with_details(part_id, color_id, kit_is_full)[0]
+
+    def route_with_details(
+        self,
+        part_id: str,
+        color_id: Optional[str],
+        kit_is_full: Optional[Callable[[str, str, str], bool]] = None,
+    ) -> tuple[str, dict[str, Any]]:
         part = str(part_id)
         color = None if color_id in (None, "", ANY_COLOR) else str(color_id)
         # A variant never fills a kit: kits take only the exact parts they list.
         for candidate, kits in ((part, True), *((base, False) for base in base_part_ids(part))):
-            category = self._match(candidate, color, kit_is_full, kits)
-            if category is not None:
-                return category
+            matched = self._match(candidate, color, kit_is_full, kits)
+            if matched is not None:
+                category, detail = matched
+                return category, {**detail, "matched_part_id": candidate}
         if self.fallback_by == "color" and color is not None:
-            return f"color_{color}"
-        return self.default
+            return f"color_{color}", {"kind": "color_fallback", "color_id": color}
+        return self.default, {"kind": "default"}
 
     def _match(
         self,
@@ -154,8 +163,8 @@ class ProfileRouter:
         color: Optional[str],
         kit_is_full: Optional[Callable[[str, str, str], bool]],
         kits: bool,
-    ) -> Optional[str]:
-        for kind, category, parts, colors in self.rules:
+    ) -> Optional[tuple[str, dict[str, Any]]]:
+        for index, (kind, category, parts, colors) in enumerate(self.rules):
             if kind == "kit":
                 if not kits:
                     continue
@@ -164,7 +173,7 @@ class ProfileRouter:
                     continue
                 if kit_is_full is not None and kit_is_full(category, part, color or ANY_COLOR):
                     continue
-                return category
+                return category, {"kind": "kit", "rule_index": index}
             if parts is None:
                 # A rule for every part (by colour only) is no evidence about a
                 # variant; the exact part number alone may take it.
@@ -174,9 +183,9 @@ class ProfileRouter:
                 continue
             if colors is not None and color not in colors:
                 continue
-            return category
+            return category, {"kind": "rule", "rule_index": index}
         if self.fallback_by == "category" and part in self.fallback_map:
-            return self.fallback_map[part]
+            return self.fallback_map[part], {"kind": "category_fallback"}
         return None
 
 
@@ -229,6 +238,9 @@ class SortingProfile(ABC):
     def setKitProgress(self, tracker: Any) -> None:
         """The kit tracker whose counts decide when a kit passes pieces on;
         a profile without kits ignores it."""
+        return None
+
+    def routeExplanation(self, part_id: str, color_id: str) -> dict[str, Any] | None:
         return None
 
     # Optional price-based override: a profile may declare a high_value_routing
@@ -344,6 +356,12 @@ class JsonSortingProfile(SortingProfile):
                 if key in self.part_to_category:
                     return self.part_to_category[key]
         return self.default_category_id
+
+    def routeExplanation(self, part_id: str, color_id: str) -> dict[str, Any] | None:
+        if self._router is None:
+            return {"kind": "legacy_map_or_quota"}
+        category, detail = self._router.route_with_details(part_id, color_id, self._kit_is_full)
+        return {"category_id": category, **detail}
 
     def highValueCategoryId(self, price: Optional[float]) -> Optional[str]:
         cfg = self.high_value_routing

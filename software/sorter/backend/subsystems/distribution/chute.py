@@ -79,6 +79,8 @@ class Chute:
         self.endstop_active_high = endstop_active_high
         self.operating_speed_microsteps_per_second = operating_speed_microsteps_per_second
         self._homed: bool = False
+        self._last_endstop_raw: bool | None = None
+        self._last_endstop_sampled_at: float | None = None
 
     @property
     def homed(self) -> bool:
@@ -135,7 +137,10 @@ class Chute:
 
     @property
     def raw_endstop_active(self) -> bool:
-        return bool(self.home_pin.value)
+        value = bool(self.home_pin.value)
+        self._last_endstop_raw = value
+        self._last_endstop_sampled_at = time.time()
+        return value
 
     @property
     def endstop_triggered(self) -> bool:
@@ -212,11 +217,31 @@ class Chute:
         delta_stepper_angle = target_stepper_angle - current_stepper_angle
         speed = int(max_speed or self.operating_speed_microsteps_per_second)
         estimated_ms = self.stepper.estimateMoveDegreesMs(delta_stepper_angle, max_speed=speed)
+        import machine_investigation
+
+        machine_investigation.record_event("chute_move_requested", {
+            "target_angle_deg": target,
+            "software_estimated_start_angle_deg": current,
+            "delta_stepper_angle_deg": delta_stepper_angle,
+            "speed_microsteps_per_s": speed,
+            "estimated_ms": estimated_ms,
+            "homed": self.homed,
+            "last_sampled_endstop_triggered": (
+                self._last_endstop_raw == self.endstop_active_high
+                if self._last_endstop_raw is not None else None
+            ),
+            "last_sampled_endstop_raw": self._last_endstop_raw,
+            "endstop_sampled_at": self._last_endstop_sampled_at,
+            "stall_detected": bool(getattr(self.stepper, "stalled", False)),
+            "chute_disabled": self.gc.disable_chute,
+            "physical_position_deg": None,
+        })
 
         if self.gc.disable_chute:
             self.logger.info(
                 f"Chute: [DISABLED] would move from {current:.1f}° to {target:.1f}° (delta_stepper_deg={delta_stepper_angle:.2f}, est_ms={estimated_ms})"
             )
+            machine_investigation.record_event("chute_move_suppressed", {"target_angle_deg": target})
             return estimated_ms
 
         self._setSpeed(speed)
@@ -224,13 +249,27 @@ class Chute:
             f"Chute: moving from {current:.1f}° to {target:.1f}° at {speed} µsteps/s (delta_stepper_deg={delta_stepper_angle:.2f}, est_ms={estimated_ms})"
         )
         if not self.stepper.move_degrees(delta_stepper_angle):
+            machine_investigation.record_event("chute_move_refused", {"target_angle_deg": target})
             return None
+        machine_investigation.record_event("chute_move_accepted", {
+            "target_angle_deg": target,
+            "software_estimated_position_deg": self.current_angle,
+            "physical_position_deg": None,
+            "last_sampled_endstop_triggered": (
+                self._last_endstop_raw == self.endstop_active_high
+                if self._last_endstop_raw is not None else None
+            ),
+            "endstop_sampled_at": self._last_endstop_sampled_at,
+            "stall_detected": bool(getattr(self.stepper, "stalled", False)),
+        })
         return estimated_ms
 
     def isBinReachable(self, address: BinAddress) -> bool:
         return self.getAngleForBin(address) is not None
 
     def moveToBin(self, address: BinAddress) -> int | None:
+        import machine_investigation
+
         target = self.getAngleForBin(address)
         if target is None:
             self.logger.error(f"Chute: bin {address} is unreachable")
@@ -238,6 +277,12 @@ class Chute:
         self.logger.info(
             f"Chute: moveToBin layer={address.layer_index} section={address.section_index} bin={address.bin_index} -> {target:.2f}°"
         )
+        machine_investigation.record_event("bin_selected", {
+            "layer_index": address.layer_index,
+            "section_index": address.section_index,
+            "bin_index": address.bin_index,
+            "target_angle_deg": target,
+        })
         return self.moveToAngle(target)
 
     def moveToAngleBlocking(self, target: float, timeout_buffer_ms: int = 0) -> int | None:

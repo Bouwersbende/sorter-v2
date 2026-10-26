@@ -1,6 +1,7 @@
 from typing import Optional, cast
 import io
 import os
+import time
 import requests
 import numpy as np
 import cv2
@@ -27,6 +28,7 @@ def _classifyImages(
     *,
     piece_uuid: Optional[str] = None,
     dump_label: Optional[str] = None,
+    source_images: Optional[list[dict]] = None,
 ) -> BrickognizeResponse:
     if not images:
         raise ValueError("at least one image required")
@@ -61,14 +63,42 @@ def _classifyImages(
     else:
         connect_timeout, read_timeout = API_TIMEOUT_S
     read_timeout = read_timeout + max(0, len(files) - 1) * 2.0
-    response = requests.post(
-        API_URL,
-        headers=headers,
-        files=files,
-        timeout=(connect_timeout, read_timeout),
-    )
-    response.raise_for_status()
-    result = cast(BrickognizeResponse, response.json())
+    started_at = time.time()
+    response = None
+    request_error = None
+    try:
+        response = requests.post(
+            API_URL,
+            headers=headers,
+            files=files,
+            timeout=(connect_timeout, read_timeout),
+        )
+        response.raise_for_status()
+        result = cast(BrickognizeResponse, response.json())
+    except Exception as exc:
+        request_error = str(exc)
+        raise
+    finally:
+        if piece_uuid:
+            # Queue the exact JPEG payloads and unfiltered response. Disk writes
+            # happen on the investigation worker, never on this API call path.
+            try:
+                import machine_investigation
+
+                machine_investigation.enqueue_brickognize(
+                    piece_uuid=piece_uuid,
+                    label=dump_label,
+                    started_at=started_at,
+                    ended_at=time.time(),
+                    status_code=response.status_code if response is not None else None,
+                    error=request_error,
+                    images=[item[1][1].getvalue() for item in files],
+                    source_images=source_images,
+                    response=response.content if response is not None else None,
+                )
+            except Exception:
+                # Evidence capture must never change a classification outcome.
+                pass
 
     # Stamp each item/color with its position in the UNFILTERED response before
     # we drop primo/duplo items. Brickognize's feedback API keys on these ranks

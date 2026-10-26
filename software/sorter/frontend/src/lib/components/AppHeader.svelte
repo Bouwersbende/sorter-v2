@@ -318,6 +318,7 @@
 	items={[
 		{ href: '/', label: 'Dashboard' },
 		{ href: '/bins', label: 'Bins' },
+		{ href: '/machine-investigation', label: 'Machine investigation' },
 		{ href: '/3d', label: '3D' },
 		{ href: '/profiles', label: 'Profiles' },
 		{
