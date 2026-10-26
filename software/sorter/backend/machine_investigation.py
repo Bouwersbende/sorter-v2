@@ -1,7 +1,7 @@
 """Local, bounded evidence for investigating a sorting run.
 
 The video writer subscribes to the existing classification camera capture. It
-stores the camera's JPEGs without decoding them. An indexed MJPEG frame stream
+resizes and compresses frames on its own thread. An indexed MJPEG frame stream
 is used instead of a fixed-frame-rate MP4: a frame's capture time remains exact
 even when the camera stalls or the recorder drops frames.
 """
@@ -27,6 +27,9 @@ _recorder: "InvestigationRecorder | None" = None
 _MAX_BYTES_DEFAULT = 8 * 1024**3
 _SEGMENT_SECONDS = 5 * 60
 _SEGMENT_BYTES = 512 * 1024**2
+_VIDEO_MAX_WIDTH = 960
+_VIDEO_MAX_HEIGHT = 540
+_VIDEO_JPEG_QUALITY = 65
 
 
 def investigation_dir() -> Path:
@@ -257,11 +260,17 @@ def _write_requests() -> None:
 
 
 class InvestigationRecorder:
-    def __init__(self, capture: Any, run_id: str, logger: Any, *, max_bytes: int = _MAX_BYTES_DEFAULT):
+    def __init__(self, capture: Any, run_id: str, logger: Any, *, max_bytes: int = _MAX_BYTES_DEFAULT,
+                 video_max_width: int = _VIDEO_MAX_WIDTH,
+                 video_max_height: int = _VIDEO_MAX_HEIGHT,
+                 video_jpeg_quality: int = _VIDEO_JPEG_QUALITY):
         self.capture = capture
         self.run_id = run_id
         self.logger = logger
         self.max_bytes = max(0, int(max_bytes))
+        self.video_max_width = max(1, int(video_max_width))
+        self.video_max_height = max(1, int(video_max_height))
+        self.video_jpeg_quality = min(100, max(1, int(video_jpeg_quality)))
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
         self.subscription: Any = None
@@ -409,9 +418,27 @@ class InvestigationRecorder:
         self._dropped_since_event = 0
         self._last_gap_emit_mono = time.monotonic()
 
-    def _loop(self) -> None:
+    def _encode_video_frame(self, jpeg: bytes | None = None, frame: Any = None) -> bytes:
+        """Compress only the investigation copy; source and API images stay intact."""
         import cv2
+        import numpy as np
 
+        image = frame if frame is not None else cv2.imdecode(
+            np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR
+        )
+        if image is None:
+            raise ValueError("classification camera returned an invalid JPEG")
+        height, width = image.shape[:2]
+        scale = min(1.0, self.video_max_width / width, self.video_max_height / height)
+        if scale < 1.0:
+            image = cv2.resize(image, (max(1, round(width * scale)), max(1, round(height * scale))),
+                               interpolation=cv2.INTER_AREA)
+        ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, self.video_jpeg_quality])
+        if not ok:
+            raise ValueError("could not encode investigation video frame")
+        return encoded.tobytes()
+
+    def _loop(self) -> None:
         fallback_seq = 1_000_000_000
         last_fallback_ts = 0.0
         while not self.stop_event.is_set():
@@ -436,16 +463,16 @@ class InvestigationRecorder:
                     frame = self.capture.latest_frame
                     if frame is not None and frame.timestamp > last_fallback_ts:
                         last_fallback_ts = frame.timestamp
-                        ok, encoded = cv2.imencode(".jpg", frame.raw, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                        if ok:
-                            jpeg, ts, seq = encoded.tobytes(), frame.timestamp, fallback_seq
-                            fallback_seq += 1
+                        jpeg, ts, seq = self._encode_video_frame(frame=frame.raw), frame.timestamp, fallback_seq
+                        fallback_seq += 1
                 if jpeg is None and self._file is not None and self.last_frame_at is not None:
                     if time.time() - self.last_frame_at > 2.0 and not self._camera_gap_reported:
                         self._camera_gap_reported = True
                         record_event("recording_gap", {"reason": "camera frames stopped",
                                                        "last_frame_at": self.last_frame_at}, run_id=self.run_id)
                 if jpeg is not None and ts is not None and seq is not None:
+                    if self.capture.raw_bytes_available:
+                        jpeg = self._encode_video_frame(jpeg=jpeg)
                     self._write_frame(jpeg, float(ts), int(seq))
                 elif self._file is not None and time.monotonic() - self._last_flush > 1.0:
                     self._flush()
@@ -476,7 +503,10 @@ def start(capture: Any, run_id: str, logger: Any) -> None:
     try:
         limit_gb = float(os.getenv("SORTER_INVESTIGATION_MAX_GB", "8"))
         _recorder = InvestigationRecorder(capture, run_id, logger,
-                                          max_bytes=int(max(0.1, limit_gb) * 1024**3))
+                                          max_bytes=int(max(0.1, limit_gb) * 1024**3),
+                                          video_max_width=int(os.getenv("SORTER_INVESTIGATION_VIDEO_MAX_WIDTH", "960")),
+                                          video_max_height=int(os.getenv("SORTER_INVESTIGATION_VIDEO_MAX_HEIGHT", "540")),
+                                          video_jpeg_quality=int(os.getenv("SORTER_INVESTIGATION_VIDEO_JPEG_QUALITY", "65")))
         _recorder.start()
     except Exception as exc:
         logger.warning(f"Investigation recorder could not start: {exc}")
@@ -508,6 +538,9 @@ def status() -> dict[str, Any]:
             "request_max_bytes": request_max_bytes(),
             "request_last_error": _request_last_error,
             "max_bytes": recorder.max_bytes if recorder else None,
+            "video_max_width": recorder.video_max_width if recorder else _VIDEO_MAX_WIDTH,
+            "video_max_height": recorder.video_max_height if recorder else _VIDEO_MAX_HEIGHT,
+            "video_jpeg_quality": recorder.video_jpeg_quality if recorder else _VIDEO_JPEG_QUALITY,
             "directory": str(investigation_dir())}
 
 

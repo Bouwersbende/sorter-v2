@@ -108,8 +108,10 @@ The **Machine investigation** page in the Sorter UI records the classification
 camera whenever the controller is sorting. It uses the camera's existing
 capture thread; it does not open another USB camera connection. The recordings
 are timestamp-indexed JPEG frames in rotating `.mjpg` segments, played by the
-page's frame viewer. It records the original JPEGs when the camera provides
-MJPEG and encodes frames on the recorder thread for other capture formats.
+page's frame viewer. The recorder thread scales each frame to fit within
+960 × 540 pixels and encodes it at JPEG quality 65 by default. This affects
+only the investigation video; the camera feed and exact images submitted to
+Brickognize keep their original quality.
 The page shows recording gaps and dropped frames rather than repeating a frame
 as if it were a new observation.
 
@@ -124,17 +126,23 @@ later filtered out.
 The recorder starts automatically with the full backend (`./dev.sh backend` or
 `./dev.sh`) and writes frames only while sorting is running. The defaults are
 8 GiB for video, 1 GiB for Brickognize request files, and 30 days of age
-retention. Override them before starting the backend:
+retention. The local `.env` can set `SORTER_INVESTIGATION_MAX_GB=50` to keep
+up to 50 GiB of video across backend restarts. Override the video size,
+quality, or limits before starting the backend:
 
 ```bash
-SORTER_INVESTIGATION_MAX_GB=16 \
+SORTER_INVESTIGATION_MAX_GB=50 \
+SORTER_INVESTIGATION_VIDEO_MAX_WIDTH=960 \
+SORTER_INVESTIGATION_VIDEO_MAX_HEIGHT=540 \
+SORTER_INVESTIGATION_VIDEO_JPEG_QUALITY=65 \
 SORTER_INVESTIGATION_REQUEST_MAX_MB=2048 \
 SORTER_INVESTIGATION_RETENTION_DAYS=14 \
 ./dev.sh backend
 ```
 
-Disk use depends on the camera's JPEG size and frame rate. For example,
-100 KiB per frame at 30 FPS is about 9.9 GiB per hour. Recording health,
+Disk use depends on scene detail, JPEG quality, and frame rate. For example,
+40 KiB per saved frame at 30 FPS is about 4 GiB per hour, so a 50 GiB video
+limit would hold roughly 12 hours; actual duration will vary. Recording health,
 current storage use, and dropped-frame counts appear at the top of the page.
 Oldest closed segments and request files are removed when their respective
 limits are exceeded; their absence is visible in the investigation page.

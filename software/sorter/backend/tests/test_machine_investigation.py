@@ -37,8 +37,10 @@ def test_video_frames_seek_and_report_camera_gap(tmp_path, monkeypatch):
     monkeypatch.setattr(recorder, "_sorting", lambda: True)
     recorder.start()
     now = time.time() - 3
-    capture.subscription.queue.put((b"\xff\xd8first\xff\xd9", now, 1))
-    capture.subscription.queue.put((b"\xff\xd8second\xff\xd9", now + 2, 3))
+    first = cv2.imencode(".jpg", np.full((12, 20, 3), 40, np.uint8))[1].tobytes()
+    second = cv2.imencode(".jpg", np.full((12, 20, 3), 180, np.uint8))[1].tobytes()
+    capture.subscription.queue.put((first, now, 1))
+    capture.subscription.queue.put((second, now + 2, 3))
     deadline = time.monotonic() + 3
     while recorder._frames < 2 and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -52,10 +54,32 @@ def test_video_frames_seek_and_report_camera_gap(tmp_path, monkeypatch):
     assert evidence.find_segment(now + 1)["id"] == segment["id"]
     frames = evidence.list_frames(segment["id"], at=now + 1, span=5)
     assert [frame["captured_at"] for frame in frames] == [now, now + 2]
-    assert evidence.frame_bytes(segment["id"], 1) == b"\xff\xd8first\xff\xd9"
-    assert evidence.frame_bytes(segment["id"], 3) == b"\xff\xd8second\xff\xd9"
+    frame_one = cv2.imdecode(np.frombuffer(evidence.frame_bytes(segment["id"], 1), np.uint8), cv2.IMREAD_COLOR)
+    frame_three = cv2.imdecode(np.frombuffer(evidence.frame_bytes(segment["id"], 3), np.uint8), cv2.IMREAD_COLOR)
+    assert frame_one.shape[:2] == frame_three.shape[:2] == (12, 20)
+    assert frame_one.mean() < frame_three.mean()
     assert evidence.frame_bytes(segment["id"], 2) is None
     assert evidence.list_events(kind="recording_gap")
+
+
+def test_video_copy_is_downscaled_without_changing_request_image(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_STATE_DB_PATH", str(tmp_path / "state.sqlite"))
+    recorder = evidence.InvestigationRecorder(
+        FakeCapture(), "run-small-video", SimpleNamespace(warning=lambda message: None), max_bytes=1024**2
+    )
+    random = np.random.default_rng(123)
+    source = random.integers(0, 256, (720, 1280, 3), dtype=np.uint8)
+    original = cv2.imencode(".jpg", source, [cv2.IMWRITE_JPEG_QUALITY, 90])[1].tobytes()
+    timestamp = time.time()
+    video_copy = recorder._encode_video_frame(jpeg=original)
+    recorder._write_frame(video_copy, timestamp, 1)
+    recorder._close()
+    segment = evidence.list_segments()[0]
+    saved = evidence.frame_bytes(segment["id"], 1)
+    assert saved == video_copy
+    assert evidence.list_frames(segment["id"], at=timestamp, span=1)[0]["captured_at"] == timestamp
+    assert cv2.imdecode(np.frombuffer(saved, np.uint8), cv2.IMREAD_COLOR).shape[:2] == (540, 960)
+    assert len(saved) < len(original)
 
 
 def test_brickognize_evidence_keeps_exact_uploaded_jpeg_and_unfiltered_reply(tmp_path, monkeypatch):
