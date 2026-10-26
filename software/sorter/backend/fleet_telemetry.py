@@ -233,10 +233,14 @@ class StepperLoadProbe:
         return entries[-1]
 
     def _candidate(self, irl: Any, now: float) -> tuple[Any, Any] | None:
+        from hardware_settings.steppers import driverUartEnabled
+
         count = len(self._motors)
         for offset in range(count):
             index = (self._next + offset) % count
             motor = self._motors[index]
+            if not driverUartEnabled(motor):
+                continue  # External STEP/DIR drivers have no TMC registers to sample.
             stepper = getattr(irl, motor.attr, None)
             if stepper is None or self._resting_until.get(motor.name, 0.0) > now:
                 continue

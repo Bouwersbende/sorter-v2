@@ -218,12 +218,15 @@
 	</button>
 	{#if setProgress && setProgress.total_needed > 0}
 		{@const isDone = setProgress.total_found >= setProgress.total_needed}
+		<div class="text-xs text-ink-muted" title="Set progress is saved separately and remains when you empty a bin.">
+			Set progress (kept after emptying)
+		</div>
 		<div class="flex items-center gap-2">
 			<div class="min-w-0 flex-1">
 				<ProgressBar
 					value={setProgress.total_found}
 					max={setProgress.total_needed}
-					label="Parts of the set found"
+					label="Set progress across bin empties"
 					tone={isDone ? 'success' : 'primary'}
 				/>
 			</div>
@@ -239,7 +242,7 @@
 		{:else}
 			<div class="num">
 				{contents?.unique_item_count ?? 0}
-				{(contents?.unique_item_count ?? 0) === 1 ? 'type' : 'types'} · {contents?.piece_count ?? 0} total
+				{(contents?.unique_item_count ?? 0) === 1 ? 'type' : 'types'} · {contents?.piece_count ?? 0} {(contents?.piece_count ?? 0) === 1 ? 'piece' : 'pieces'} recorded since emptying
 			</div>
 			{#if !sectionOn}
 				<Badge>Section off</Badge>

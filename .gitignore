@@ -30,6 +30,7 @@ software/sorteros/v3/build/.env
 /docs/node_modules/
 /docs/.svelte-kit/
 /docs/build/
+/.pnpm-store/
 
 # Rendered WireViz output. build-harness.sh generates it from the YAML sources
 # beside it; upload-harness.py publishes it to the asset service and prints

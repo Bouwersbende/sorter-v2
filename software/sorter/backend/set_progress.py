@@ -146,6 +146,17 @@ class SetProgressTracker:
         ]
         return bool(entries) and all(entry["quantity_found"] >= entry["quantity_needed"] for entry in entries)
 
+    def reset(self) -> None:
+        """Start the active set inventory again without changing bin contents."""
+        for entries in self._set_parts.values():
+            for entry in entries:
+                entry["quantity_found"] = 0
+        for info in self._set_info.values():
+            info["total_found"] = 0
+        self._dirty = True
+        self._state_token += 1
+        self.save()
+
     def get_progress(self) -> dict[str, Any]:
         """Get per-set progress summary."""
         sets = []

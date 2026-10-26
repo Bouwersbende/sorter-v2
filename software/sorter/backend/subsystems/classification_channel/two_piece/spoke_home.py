@@ -374,9 +374,20 @@ def clearPiecesFromChannel(
     # both agree on direction and on when the channel is actually empty.
     from .channel_clear import clearChannelByAdvancing
 
-    clearChannelByAdvancing(
+    result = clearChannelByAdvancing(
         gc, irl, irl_config, label="C4 rev01 spoke home pre-purge"
     )
+    if not result.cleared:
+        if result.reason.endswith("_servo_uncalibrated"):
+            layer = result.reason.rsplit(":", 1)[-1].split("_")[1]
+            raise RuntimeError(
+                f"Cannot clear classification channel: layer {layer} door servo is not calibrated. "
+                "Set its open and closed angles in Settings > Storage layers, then home again. "
+                f"({result.reason})"
+            )
+        raise RuntimeError(
+            f"Cannot clear classification channel into physical discard ({result.reason})"
+        )
 
 
 def maybeRunSpokeHome(

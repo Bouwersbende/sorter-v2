@@ -25,6 +25,7 @@ CURRENTS = "stepper_current_overrides"
 DRIVER = "stepper_driver"
 STALLGUARD = "stepper_stallguard"
 DIRECTIONS = "stepper_direction_inverts"
+DRIVER_UART = "stepper_driver_uart"
 
 TMC_REG_GCONF = 0x00
 TMC_REG_TCOOLTHRS = 0x14
@@ -176,6 +177,37 @@ def readStepperSettings(
     if isinstance(directions, dict) and motor.name in directions:
         _take(FIELDS["inverted"], directions[motor.name], values, saved, f"{DIRECTIONS}.{motor.name}", logger)
     return StepperSettings(**values, saved=frozenset(saved))
+
+
+def driverUartEnabled(
+    motor: Motor,
+    config: Mapping[str, Any] | None = None,
+    logger: Any = None,
+) -> bool:
+    """Whether this motor's driver supports TMC2209 UART readback.
+
+    An external STEP/DIR chute driver can move without that connection. The
+    exception must be explicit in machine.toml; all other motors keep verified
+    driver setup by default.
+    """
+    if config is None:
+        config = machine_toml.read()
+    table = config.get(DRIVER_UART)
+    if table is None:
+        return True
+    if not isinstance(table, dict):
+        if logger is not None:
+            logger.warning(f"{DRIVER_UART} must be a table; verifying every driver.")
+        return True
+    for key in _entryKeys(motor, config):
+        if key in table:
+            value = table[key]
+            if type(value) is bool:
+                return value
+            if logger is not None:
+                logger.warning(f"{DRIVER_UART}.{key} must be true or false; verifying this driver.")
+            return True
+    return True
 
 
 def changedStepperSettings(

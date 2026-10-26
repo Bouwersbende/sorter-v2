@@ -1,16 +1,23 @@
 <script lang="ts">
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import Panel from '$lib/components/ui/Panel.svelte';
+	import type { BinInfo } from './types';
+
+	let { assignedBin }: { assignedBin?: BinInfo | null } = $props();
 </script>
 
-<!-- The virtual passthrough "bin": pieces without a matching rule fall through
-     every layer's doors into the discard bucket below the machine. It is shown
-     so the operator knows the output exists; it is not interactive and has no
-     physical slot. -->
+<!-- Discard requires an assigned physical bin; pieces are held if it is unavailable. -->
 <Panel title="Discard bin">
-	{#snippet actions()}<Badge>Virtual</Badge>{/snippet}
-	<p class="text-sm text-ink-muted">
-		Pieces that match no sorting rule, or whose category has no assigned bin, fall through all layer
-		doors into the discard bucket below the machine. Empty it by hand when it fills up.
-	</p>
+	{#snippet actions()}<Badge>{assignedBin ? `Bin ${assignedBin.global_index + 1}` : 'Unassigned'}</Badge>{/snippet}
+	{#if assignedBin}
+		<p class="text-sm text-ink-muted">
+			Unrecognized pieces and recovery sweeps route to bin {assignedBin.global_index + 1}.
+			Oversized pieces use it when this machine's discard opening is configured to accept them.
+		</p>
+	{:else}
+		<p class="text-sm text-ink-muted">
+			Assign “Discard / unknown” to a physical bin before sorting. Pieces are held when
+			no discard bin is available.
+		</p>
+	{/if}
 </Panel>

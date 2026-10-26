@@ -113,12 +113,6 @@ _STAGE_STEP_DEG = 25.0
 # very next turn of the platter; two cycles covers the one after it as well.
 _BUCKET_HOLD_EJECTS = 2
 
-# The head goes out with the turn that stages the next piece. When no next
-# piece has come for this long (the feeder ran dry, or stalled), it goes out on
-# its own, to its bin, instead of waiting for the stall watchdog to sweep the
-# channel into the bucket.
-_HEAD_ALONE_AFTER_S = 12.0
-
 # A piece that does not fall off the exit (a tire's rubber grips the platter)
 # rides on around the channel, past the camera, and comes back into the drop
 # zone, where it is photographed and classified again: one piece, two records.
@@ -218,7 +212,8 @@ _KEEP_ON_MIN_GAP_DEG = 25.0
 # means it was paused, or held by an incident.
 _RESUME_GAP_S = 1.0
 
-# Safety ceilings so a move that never resolves can't wedge the machine forever.
+# Timeouts stop blind movement. The stall watchdog handles a piece that stays
+# visible; it must never be counted as dropped solely because time elapsed.
 _EJECT_TIMEOUT_S = 15.0
 _STAGE_TIMEOUT_S = 15.0
 
@@ -283,6 +278,7 @@ class _TrackedPiece:
         # When it was committed, and how often it has been pushed since because
         # it was still seen at the exit (see _LINGER_AFTER_EJECT_S).
         self.ejected_at: Optional[float] = None
+        self.eject_timeout_noted = False
         self.push_offs = 0
         # Two+ pieces landed in the drop zone at once -> can't classify reliably,
         # route to the misc bin. multi_drop_group ties the clump's distinct track
@@ -437,22 +433,19 @@ class TwoPieceClassificationChannel(Rev01BaseState):
     # ------------------------------------------------------- loose-piece safety
 
     def _holdBucket(self, reason: str, cycles: int = _BUCKET_HOLD_EJECTS) -> None:
-        """Route everything to the bottom bucket for the next few ejects.
+        """Hold normal rotations and sweep the channel to physical discard.
 
         A multi-drop's pieces touch, so the detector merges and re-ids them and we
         routinely lose one mid-channel. The piece is still on the platter and will
-        drop off the exit on some later turn; with a layer door closed for whatever
-        piece distribution is aiming at, it lands in that customer bin. We cannot
-        see it any more, so we cannot time it — instead nothing claims a bin until
-        it has had a few cycles to fall.
+        drop off the exit on some later turn. Stop normal rotations, aim discard,
+        and sweep the channel before returning to sorted routing.
         """
         was = self._bucket_hold_cycles
         self._bucket_hold_cycles = max(was, int(cycles))
         self.shared.bucket_passthrough_hold = True
         if was <= 0:
             self.logger.warning(
-                f"{LOG_TAG} {reason} — holding every layer door open for the next "
-                f"{self._bucket_hold_cycles} ejects so it cannot land in a sorted bin"
+                f"{LOG_TAG} {reason} — holding normal rotations for physical discard sweep"
             )
 
     def _releaseBucket(self, reason: str) -> None:
@@ -476,38 +469,13 @@ class TwoPieceClassificationChannel(Rev01BaseState):
         """Forced recovery for a wedged channel: rotate forward (occupancy-checked,
         blocking) until perception sees the channel empty or the budget runs out.
 
-        The sweep opens every layer door first (``clearChannelByAdvancing``), so
-        the whole channel — the piece the chute was aimed for plus anything else
-        riding the platter — goes to the bottom bucket. Nothing here has been
-        routed piece-by-piece, and letting an unrouted mixture drop into a
-        customer's sorted bin is worse than losing it to the bucket. A placed
-        head whose chute is already aimed is still committed to distribution
-        first (so distribution doesn't wedge waiting for a drop that a forced
-        rotation already performed), but its bin is cleared so the record says
-        where it actually went. The rest have their in-flight objects abandoned,
-        and anything still in distribution's slot is withdrawn."""
+        The sweep aims at the physical discard bin before rotating. If discard
+        cannot be aimed, it leaves the channel stationary for operator recovery.
+        A placed head is committed only after the sweep actually rotates, and
+        its recorded destination is the physical discard bin."""
+        if self.shared.chute_move_in_progress:
+            return ChannelClearResult(False, True, 0.0, "chute_busy")
         placed = self._pendingPlacedPiece()
-        if placed is not None and self._headReady(placed):
-            obj = placed.known_object
-            if obj is not None and obj.destination_bin is not None:
-                self.logger.warning(
-                    f"{LOG_TAG} stall auto-clear: placed head track={placed.track_id} was aimed at "
-                    f"bin {obj.destination_bin}, but the sweep runs with the doors open — "
-                    f"recording it as a bucket passthrough"
-                )
-                obj.destination_bin = None
-                obj.updated_at = time.time()
-            notePieceProblem(
-                obj,
-                "swept",
-                "The classification channel stopped making progress, so the machine turned it "
-                "with every door open to clear it; this piece went to the bucket, not its bin.",
-            )
-            self._commitToDistribution(placed)
-            self.logger.info(
-                f"{LOG_TAG} stall auto-clear: committed placed head "
-                f"track={placed.track_id} to distribution"
-            )
         result = clearChannelByAdvancing(
             self.gc,
             self.irl,
@@ -515,6 +483,22 @@ class TwoPieceClassificationChannel(Rev01BaseState):
             max_output_deg=max_output_deg,
             label=LOG_TAG,
         )
+        if placed is not None and self._headReady(placed) and result.output_deg_moved > 0:
+            obj = placed.known_object
+            if obj is not None:
+                obj.destination_bin = getattr(result, "destination_bin", None)
+                obj.updated_at = time.time()
+                notePieceProblem(
+                    obj,
+                    "swept",
+                    "The classification channel stopped making progress; this piece was "
+                    "swept into the physical discard bin.",
+                )
+            self._commitToDistribution(placed)
+            self.logger.info(
+                f"{LOG_TAG} stall auto-clear: committed placed head "
+                f"track={placed.track_id} to discard bin {result.destination_bin}"
+            )
         if result.cleared:
             for tp in self._pieces.values():
                 if tp.ejected:
@@ -523,7 +507,7 @@ class TwoPieceClassificationChannel(Rev01BaseState):
                     tp.known_object,
                     "swept",
                     "The classification channel stopped making progress, so the machine turned "
-                    "it with every door open to clear it; this piece went to the bucket.",
+                    "it toward the physical discard bin to clear it.",
                 )
                 try:
                     tp.worker.abandonInFlightObject(
@@ -531,9 +515,7 @@ class TwoPieceClassificationChannel(Rev01BaseState):
                     )
                 except Exception:
                     pass
-            # A placed piece that was not committed above just fell wherever the
-            # chute pointed. Leaving it in the slot kept distribution waiting for
-            # its drop forever, and every later stall dumped the channel again.
+            # A placed piece that was not committed above has left the channel.
             if self.transport.clearPieceForDistribution():
                 self.logger.warning(
                     f"{LOG_TAG} stall auto-clear: withdrew the uncommitted placed piece from distribution"
@@ -545,8 +527,7 @@ class TwoPieceClassificationChannel(Rev01BaseState):
             self._multi_drop_streak = 0
             self._multi_drop_last_ts = -1.0
             self._cycles.drop()
-            # The sweep ran with every door open and emptied the channel, so no
-            # loose piece is left to protect the bins from.
+            # The sweep emptied the channel; no loose piece remains.
             self._releaseBucket("stall auto-clear emptied the channel")
             self._enterPhase(_Phase.WAITING)
         return result
@@ -593,6 +574,29 @@ class TwoPieceClassificationChannel(Rev01BaseState):
         # Classification results arrive on background threads — apply them every
         # tick regardless of phase.
         self._applyResults(now)
+
+        # A lost multi-drop sibling can fall on the next turn even when the
+        # tracked head was already aimed at a normal bin. Do not start another
+        # normal rotation: aim the physical discard bin and clear the channel.
+        if self._bucket_hold_cycles > 0:
+            self.setClassificationReady(False, "loose piece needs discard sweep")
+            if not stopped or self.shared.chute_move_in_progress:
+                return
+            result = self.attemptStallAutoClear(max_output_deg=720.0)
+            if not result.cleared:
+                self.logger.warning(
+                    f"{LOG_TAG} loose-piece discard sweep held the channel ({result.reason})"
+                )
+                if result.reason.startswith("discard_unavailable:"):
+                    import incidents
+
+                    incidents.report(
+                        self.gc,
+                        "distribution_no_bin_available",
+                        subject="physical_discard",
+                        detail="The classification channel cannot clear until the physical discard bin is available.",
+                    )
+            return
 
         if self._phase == _Phase.WAITING:
             if stopped:
@@ -1311,86 +1315,64 @@ class TwoPieceClassificationChannel(Rev01BaseState):
     # ----------------------------------------------------------------- movement
 
     def _maybeStartRotation(self) -> None:
-        # The ONLY two rotation triggers, both requiring a captured drop piece to
-        # bring into the channel:
-        #   1. no head on the channel       -> stage the drop piece (no eject)
-        #   2. head ready to ship           -> eject it AND stage the drop piece
-        # If a head exists but is not ready yet, we wait (don't rotate a not-ready
-        # piece toward the fall-off).
-        drop = self._dropPiece()
-        if drop is None or not drop.capture_done:
-            self._maybeEjectHeadAlone()
-            return
+        # Drain the forward queue one piece at a time. A turn sized to stage
+        # a drop-zone piece must never carry another forward piece across the
+        # fall-off while the chute is aimed for the current head.
         head = self._headPiece()
-        if head is None:
-            self._stage_target = drop
-            self._eject_target = None
-            self._enterPhase(_Phase.STAGING)
-            self._rotation_started_at = time.monotonic()
-            self._cycles.rotated(time.time(), ejecting=False)
-            self.logger.info(f"{LOG_TAG} ROTATE: stage track={drop.track_id} (no head)")
-        elif self._headReady(head):
-            self._stage_target = drop
+        if head is not None:
+            if not self._headReady(head):
+                return
+            self._stage_target = None
             self._eject_target = head
             self._enterPhase(_Phase.EJECTING)
             self._rotation_started_at = time.monotonic()
             self._cycles.rotated(time.time(), ejecting=True)
-            self.logger.info(
-                f"{LOG_TAG} ROTATE: eject track={head.track_id} + stage track={drop.track_id}"
-            )
+            self.logger.info(f"{LOG_TAG} ROTATE: eject track={head.track_id} alone")
+            return
 
-    def _maybeEjectHeadAlone(self) -> None:
-        # Counted from when the feeder was let in, or, while its gate stays shut
-        # with no piece to photograph, from when the channel stopped: a piece
-        # left straddling the drop zone's edge (its centre out, its box in)
-        # reads as an occupied drop zone, so no next piece could ever come and
-        # only the stall watchdog's sweep moved the channel on.
-        since = self._ready_since if self._ready_since is not None else self._phase_started_at
-        if time.monotonic() - since < _HEAD_ALONE_AFTER_S:
+        drop = self._dropPiece()
+        if drop is None or not drop.capture_done:
             return
-        head = self._headPiece()
-        if head is None or not self._headReady(head):
-            return
-        self._stage_target = None
-        self._eject_target = head
-        self._enterPhase(_Phase.EJECTING)
-        self.logger.info(
-            f"{LOG_TAG} ROTATE: eject track={head.track_id} alone "
-            f"(no next piece for {_HEAD_ALONE_AFTER_S:.0f} s)"
-        )
+        self._stage_target = drop
+        self._eject_target = None
+        self._enterPhase(_Phase.STAGING)
+        self._rotation_started_at = time.monotonic()
+        self._cycles.rotated(time.time(), ejecting=False)
+        self.logger.info(f"{LOG_TAG} ROTATE: stage track={drop.track_id} (forward zone clear)")
 
     def _ejecting(self, state, stopped: bool, now: float) -> None:
         target = self._eject_target
         if target is None:
-            self._enterPhase(_Phase.STAGING)
+            self._enterPhase(_Phase.WAITING)
             return
         gone_for = now - target.last_seen
         timed_out = (now - self._phase_started_at) > _EJECT_TIMEOUT_S
-        if gone_for >= _EJECT_GONE_CONFIRM_S or timed_out:
-            # Track id gone (debounced) == the piece dropped off the fall-off ==
-            # ejected. Commit it to distribution; the chute was already aimed.
-            self._rememberEject(target, timed_out=gone_for < _EJECT_GONE_CONFIRM_S)
+        if gone_for >= _EJECT_GONE_CONFIRM_S:
+            # A sustained lost track is the exit signal. Time alone is not:
+            # the piece might still be riding the platter.
+            self._rememberEject(target, timed_out=timed_out)
             self._commitToDistribution(target)
             self._cycles.ejected(time.time())
             if self._bucket_hold_cycles > 0:
                 self._bucket_hold_cycles -= 1
                 if self._bucket_hold_cycles == 0:
                     self._releaseBucket("loose piece has had its cycles to fall")
-            if timed_out and gone_for < _EJECT_GONE_CONFIRM_S:
+            self.logger.info(f"{LOG_TAG} ejected track={target.track_id} (id gone)")
+            self._eject_target = None
+            self._enterPhase(_Phase.WAITING)
+            return
+        if timed_out:
+            if not target.eject_timeout_noted:
+                target.eject_timeout_noted = True
                 self.logger.warning(
-                    f"{LOG_TAG} EJECT timeout track={target.track_id} — committing anyway"
+                    f"{LOG_TAG} EJECT timeout track={target.track_id} — still visible, not counted; waiting for stall recovery"
                 )
                 notePieceProblem(
                     target.known_object,
                     "eject_timeout",
-                    f"It was still on the channel {_EJECT_TIMEOUT_S:.0f} s after the turn meant to "
-                    f"drop it into its bin; it was counted as dropped anyway.",
+                    f"Still visible on the channel after {_EJECT_TIMEOUT_S:.0f} s; not counted as dropped.",
                     after_s=now - self._phase_started_at,
                 )
-            else:
-                self.logger.info(f"{LOG_TAG} ejected track={target.track_id} (id gone)")
-            self._eject_target = None
-            self._enterPhase(_Phase.STAGING)
             return
         if gone_for > 0.0:
             return  # id missing (likely just dropped) — stop pushing, let it confirm
@@ -1406,15 +1388,12 @@ class TwoPieceClassificationChannel(Rev01BaseState):
                 to_middle = float(gap) - float(pieces[0].com_forward_to_exit_deg)
                 gap = float(target.gap_to_exit) + to_middle
             if gap is not None and gap > self.ctx.config.discharge_center_tolerance_deg:
-                # One move for the whole cycle: far enough to drop the head, and
-                # to bring the piece being staged to the holding band, so the
-                # staging that follows has nothing left to do — short of bringing
-                # a piece waiting behind the head up to the exit.
-                move = max(gap, self._stageGap())
-                move = min(self.ctx.config.discharge_max_move_output_deg, move)
+                move = min(self.ctx.config.discharge_max_move_output_deg, gap)
                 limit = self._keepOnLimit(exclude=target)
                 if limit is not None:
-                    move = max(gap, min(move, limit))
+                    move = min(move, limit)
+                if move <= 0:
+                    return
                 self.startOutputMove(
                     C4_TRAVEL_SIGN * move, self.ctx.config.discharge_speed_usteps_per_s
                 )
@@ -1434,21 +1413,6 @@ class TwoPieceClassificationChannel(Rev01BaseState):
             room = gap - _KEEP_ON_MIN_GAP_DEG
             limit = room if limit is None else min(limit, room)
         return limit
-
-    def _stageGap(self) -> float:
-        """How far the piece being staged is from the start of the holding band
-        (the precise zone); 0 when unknown."""
-        target = self._stage_target
-        if target is None or target.gap_to_exit is None:
-            return 0.0
-        perception_service = getattr(self.gc, "perception_service", None)
-        channels = perception_service.channels() if perception_service is not None else {}
-        channel = channels.get(4)
-        if channel is None or not channel.precise_sections:
-            return 0.0
-        from perception.channel import SECTION_DEG
-
-        return max(0.0, float(target.gap_to_exit) - len(channel.precise_sections) * SECTION_DEG)
 
     def _staging(self, state, stopped: bool, now: float) -> None:
         # Advance the platter until the DROP ZONE IS CLEAR — i.e. the new piece and

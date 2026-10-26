@@ -16,7 +16,7 @@ import serial.tools.list_ports
 
 
 PICO_VID = 0x2E8A
-PICO_PID = 0x000A
+PICO_PIDS = {0x0009, 0x000A}
 CMD_INIT = 0x00
 CMD_REBOOT_BOOTLOADER = 0x02
 CMD_GET_VERSION = 0x04
@@ -73,7 +73,7 @@ def _send_recv(ser: serial.Serial, address: int, command: int, channel: int, pay
 
 
 def _enumerate_picos() -> list[str]:
-    return [p.device for p in serial.tools.list_ports.comports() if p.vid == PICO_VID and p.pid == PICO_PID]
+    return [p.device for p in serial.tools.list_ports.comports() if p.vid == PICO_VID and p.pid in PICO_PIDS]
 
 
 def _identify_board(port: str) -> str | None:

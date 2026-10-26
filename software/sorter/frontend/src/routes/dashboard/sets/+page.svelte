@@ -1,10 +1,12 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { confirmDialog } from '$lib/confirm.svelte';
 	import { getMachinesContext, getMachineContext } from '$lib/machines/context';
 	import { getBackendHttpBase, machineHttpBaseUrlFromWsUrl } from '$lib/backend';
 	import ChevronDown from '@lucide/svelte/icons/chevron-down';
 	import ChevronRight from '@lucide/svelte/icons/chevron-right';
 	import Printer from '@lucide/svelte/icons/printer';
+	import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
 	import AppShell from '$lib/components/AppShell.svelte';
 	import Alert from '$lib/components/ui/Alert.svelte';
 	import Button from '$lib/components/ui/Button.svelte';
@@ -50,6 +52,8 @@
 	let data = $state<ProgressData | null>(null);
 	let error = $state<string | null>(null);
 	let expanded_sets = $state<Set<string>>(new Set());
+	let resetting = $state(false);
+	let notice = $state<string | null>(null);
 
 	function currentBackendBaseUrl(): string {
 		return (
@@ -77,6 +81,35 @@
 		}
 	}
 
+	async function resetProgress() {
+		if (resetting || !data?.is_set_based) return;
+		if (
+			!(await confirmDialog({
+				title: 'Reset set progress?',
+				message:
+					'Stop sorting first. This resets all found counts for the active set profile to zero. It does not empty bins, change their assignments, or delete piece history.',
+				action: 'Reset set progress',
+				danger: true
+			}))
+		)
+			return;
+		resetting = true;
+		try {
+			const res = await fetch(`${currentBackendBaseUrl()}/api/set-progress/reset`, { method: 'POST' });
+			if (!res.ok) {
+				const detail = await res.json().catch(() => null);
+				throw new Error(detail?.detail ?? `HTTP ${res.status}`);
+			}
+			data = await res.json();
+			error = null;
+			notice = 'Set progress reset to zero.';
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Failed to reset set progress';
+		} finally {
+			resetting = false;
+		}
+	}
+
 	onMount(() => {
 		fetchProgress();
 		const interval = setInterval(fetchProgress, 3000);
@@ -89,6 +122,7 @@
 		activeBaseUrl = nextBaseUrl;
 		data = null;
 		error = null;
+		notice = null;
 		void fetchProgress();
 	});
 
@@ -107,10 +141,14 @@
 		<PageHeader title="Set progress" description="How many of each set's parts the sorter has found so far.">
 			{#snippet actions()}
 				<Button icon={Printer} href="/dashboard/sets/checklist">Checklist</Button>
+				{#if is_set_based}
+					<Button icon={RotateCcw} variant="danger" loading={resetting} onclick={resetProgress}>Reset set progress</Button>
+				{/if}
 			{/snippet}
 		</PageHeader>
 
 		{#if error}<Alert tone="danger">{error}</Alert>{/if}
+		{#if notice}<Alert tone="success">{notice}</Alert>{/if}
 
 		{#if !is_set_based}
 			<EmptyState title="The active sorting profile is not set-based">

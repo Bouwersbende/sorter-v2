@@ -114,6 +114,15 @@ class DistributionLayout:
     layers: List[Layer] = field(default_factory=list)
 
 
+def fixedClosedSingleLayerReady(layout: DistributionLayout) -> bool:
+    """A fixed closed top flap can receive pieces only on layer 1.
+
+    Other configured layers may exist but must be disabled. With no moving
+    flaps, nothing can select a lower layer safely.
+    """
+    return [i for i, layer in enumerate(layout.layers) if layer.enabled] == [0]
+
+
 VALID_BIN_SIZES = {"small", "medium", "big"}
 
 

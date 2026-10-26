@@ -32,7 +32,7 @@ from .arcs import bboxInsideChannelMask
 from .capture import CaptureWorker
 from .channel import ChannelDef, channelDefFor
 from .inference import InferenceWorker, OnExitEdge
-from .runtime import InferenceRuntime, RknnYoloRuntime
+from .runtime import InferenceRuntime, OnnxYoloRuntime, RknnYoloRuntime
 from .state import ChannelState, EMPTY_STATE, LatestStateSlot
 
 
@@ -723,13 +723,22 @@ def _release_runtime(runtime: Optional[InferenceRuntime]) -> None:
             return
 
 
+def _default_runtime_factory(*, model_path, **kwargs) -> InferenceRuntime:
+    suffix = str(model_path).lower()
+    if suffix.endswith(".onnx"):
+        return OnnxYoloRuntime(model_path=model_path, **kwargs)
+    if suffix.endswith(".rknn"):
+        return RknnYoloRuntime(model_path=model_path, **kwargs)
+    raise ValueError(f"perception supports YOLO ONNX and RKNN models, got {model_path}")
+
+
 def build(
     *,
     gc: Any,
     irl_config: Any,
     camera_service: Any,
     model_path_lookup,                  # callable: algorithm_id -> (model_path, imgsz) or None
-    runtime_factory=RknnYoloRuntime,    # injectable for tests
+    runtime_factory=_default_runtime_factory,  # injectable for tests
     conf_thresholds: Optional[Dict[int, float]] = None,
     on_c3_exit_edge: Optional[OnExitEdge] = None,
 ) -> PerceptionService:

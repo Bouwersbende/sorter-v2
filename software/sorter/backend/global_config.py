@@ -46,6 +46,7 @@ class GlobalConfig:
     run_id: str
     disable_chute: bool
     disable_servos: bool
+    fixed_closed_single_layer: bool
     disable_c_channels: set[int]  # {1, 2, 3, 4} — c-channel rotor steppers to suppress
     disable_carousel: bool         # carousel stepper (same physical motor as c_channel_4)
     no_power_development_mode: bool
@@ -77,14 +78,10 @@ class GlobalConfig:
         self.log_perception_attribution = False
         self.dump_logs_to_file = False
         self.disable_chute = False
-        # On the restart branch we explicitly simulate the distributor: the
-        # Waveshare layer-servo bus isn't reliably available, but C1-C4 must
-        # still run continuously. ``disable_servos=True`` makes the
-        # Positioning state machine fall through without waiting on real
-        # layer-servo motion. Override with ``--disable servos`` (still
-        # honored) or LEGOSORTER_DISABLE env, or flip back here once the
-        # layer-servo bus is reattached.
-        self.disable_servos = True
+        # Resolved from machine.toml and command-line/environment flags in
+        # mkGlobalConfig. Fixed-closed mode disables only the absent door servos.
+        self.disable_servos = False
+        self.fixed_closed_single_layer = False
         self.disable_c_channels: set[int] = set()
         self.disable_carousel = False
         self.no_power_development_mode = False
@@ -155,8 +152,15 @@ def mkGlobalConfig() -> GlobalConfig:
         if token.strip()
     }
     all_disable = set(args.disable) | env_disable
+    import machine_toml
+
+    servo_config = machine_toml.read().get("servo", {})
+    gc.fixed_closed_single_layer = (
+        isinstance(servo_config, dict)
+        and servo_config.get("fixed_closed_single_layer") is True
+    )
     gc.disable_chute = "chute" in all_disable
-    gc.disable_servos = "servos" in all_disable
+    gc.disable_servos = "servos" in all_disable or gc.fixed_closed_single_layer
     for ch in (1, 2, 3, 4):
         if f"c_channel_{ch}" in all_disable:
             gc.disable_c_channels.add(ch)

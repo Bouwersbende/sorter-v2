@@ -6,6 +6,7 @@ from unittest.mock import patch
 import db
 from bin_contents import (
     clear_current_session_bins,
+    current_part_counts_by_category,
     get_active_sorting_session,
     get_bin_snapshot,
     get_bin_snapshot_pieces,
@@ -92,6 +93,30 @@ class BinContentsTests(unittest.TestCase):
 
         clear_current_session_bins(scope="all")
         self.assertEqual({(0, 0, 0): 0, (1, 0, 2): 0}, get_current_bin_piece_counts())
+
+    def test_quota_counts_follow_bin_clears_and_session_carry_forward(self) -> None:
+        start_new_sorting_session(reason="test")
+        for uuid, category, color, bin_index in (
+            ("one", "bag1", "5", 0),
+            ("two", "bag2", "5", 1),
+            ("three", "bag2", "7", 1),
+        ):
+            record_piece_distribution({
+                "uuid": uuid, "destination_bin": [0, 0, bin_index],
+                "distributed_at": 1.0, "part_id": "3001", "color_id": color,
+                "category_id": category,
+            })
+        record_piece_distribution({
+            "uuid": "one", "destination_bin": [0, 0, 0], "distributed_at": 1.0,
+            "part_id": "3001", "color_id": "5", "category_id": "bag1",
+        })
+        with patch.object(db, "_open", side_effect=AssertionError("quota read opened SQLite")):
+            self.assertEqual({"bag1": 1, "bag2": 1}, current_part_counts_by_category("3001", "5", ["bag1", "bag2"]))
+            self.assertEqual({"bag1": 1, "bag2": 2}, current_part_counts_by_category("3001", None, ["bag1", "bag2"]))
+        start_new_sorting_session(reason="test")
+        self.assertEqual({"bag1": 1, "bag2": 1}, current_part_counts_by_category("3001", "5", ["bag1", "bag2"]))
+        clear_current_session_bins(scope="bin", layer_index=0, section_index=0, bin_index=0)
+        self.assertEqual({"bag2": 1}, current_part_counts_by_category("3001", "5", ["bag1", "bag2"]))
 
     def test_bin_snapshots_accumulate_layers_and_close_on_all_clear(self) -> None:
         start_new_sorting_session(reason="test")

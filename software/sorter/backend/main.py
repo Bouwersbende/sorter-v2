@@ -697,7 +697,10 @@ def main() -> None:
             )
 
         if gc.disable_servos:
-            gc.logger.info("Servo control disabled via --disable servos")
+            gc.logger.info(
+                "Servo control disabled: fixed closed layer 1"
+                if gc.fixed_closed_single_layer else "Servo control disabled via --disable servos"
+            )
         else:
             shared_state.setHardwareStatus(homing_step="Opening servos...")
             gc.logger.info("Opening all layer servos...")
@@ -722,6 +725,15 @@ def main() -> None:
                 except Exception as e:
                     gc.logger.warning(f"Failed to open servo: {e}. Continuing without initialization.")
             _checkServoBusHealth(gc, irl)
+
+        # The classification-channel pre-home purge can drop pieces. Home the
+        # chute first so that purge can aim at the physical discard bin.
+        chute_homed_before_purge = False
+        if not _noPowerModeActive(gc) and not gc.disable_chute:
+            gc.logger.info("Homing chute before classification-channel purge...")
+            if not irl.chute.home():
+                raise RuntimeError("Chute homing failed before classification-channel purge")
+            chute_homed_before_purge = True
 
         if not _noPowerModeActive(gc):
             from subsystems.classification_channel.two_piece.spoke_home import (
@@ -748,7 +760,7 @@ def main() -> None:
         )
 
         chute = getattr(next_controller.coordinator.distribution, "chute", None) if hasattr(next_controller, "coordinator") else None
-        if chute is not None and not _noPowerModeActive(gc) and not gc.disable_chute:
+        if chute is not None and not _noPowerModeActive(gc) and not gc.disable_chute and not chute_homed_before_purge:
             gc.logger.info("Homing chute...")
             try:
                 if chute.home():
@@ -797,7 +809,10 @@ def main() -> None:
         setHardwareRuntimeIRL(irl)
 
         if gc.disable_servos:
-            gc.logger.info("Servo control disabled via --disable servos")
+            gc.logger.info(
+                "Servo control disabled: fixed closed layer 1"
+                if gc.fixed_closed_single_layer else "Servo control disabled via --disable servos"
+            )
         else:
             shared_state.setHardwareStatus(homing_step="Opening servos...")
             for servo in irl.servos:

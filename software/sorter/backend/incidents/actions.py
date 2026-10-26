@@ -46,21 +46,11 @@ def _rehomeChute(gc: Any, incident: dict[str, Any]) -> None:
     stallguard.rehome_after_stall()
 
 
-def _passThrough(gc: Any, incident: dict[str, Any]) -> None:
-    from server import shared_state
-
-    approve = getattr(shared_state, "approveDistributionNoBinPassthrough", None)
-    if callable(approve):
-        piece = incident.get("piece_uuid")
-        approve(piece if isinstance(piece, str) else None)
-    _done(gc, incident)
-
-
 ACTIONS: dict[str, Action] = {
     "done": Action("Done", _done),
     "stop_recovery": Action("Stop", _stopRecovery),
     "clear_c4": Action("Turn to clear", _clearC4),
     "clear_stall": Action("Done", _clearStall),
     "rehome_chute": Action("Home chute", _rehomeChute),
-    "pass_through": Action("Send to bucket", _passThrough),
+    "retry_bin": Action("Retry", _done),
 }

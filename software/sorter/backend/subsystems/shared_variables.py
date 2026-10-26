@@ -34,11 +34,10 @@ class SharedVariables:
         # chute was actually aimed for, not whatever holds the slot when READY
         # first runs.
         self.distribution_positioned_uuid: Optional[str] = None
-        # True while the classification channel believes an unrouted piece (a
-        # multi-drop clump member whose track it lost) is still riding the
-        # platter. Positioning then sends everything to the bottom bucket with
-        # every door open, so the loose piece cannot land in a sorted bin when it
-        # falls. Written by the classification channel, read by Positioning.
+        # True while the classification channel believes an unrouted piece is
+        # still riding the platter. The channel sweeps toward physical discard
+        # before another normal rotation; Positioning also routes to discard
+        # while this hold is set.
         self.bucket_passthrough_hold: bool = False
         self._chute_move_in_progress: bool = False
         self._ignored_classification_dropzone_track_ids: set[int] = set()

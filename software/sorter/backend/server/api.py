@@ -454,8 +454,9 @@ def getSortingProfileMetadata() -> SortingProfileMetadataResponse:
         updated_at=data.get("updated_at", ""),
         default_category_id=data.get("default_category_id", "misc"),
         categories={
-            k: SortingProfileCategoryMeta(**v)
+            k: SortingProfileCategoryMeta(**{**v, "name": v.get("name") or v.get("label") or k})
             for k, v in data.get("categories", {}).items()
+            if isinstance(v, dict)
         },
         category_order=[str(item) for item in data.get("category_order") or []],
         rules=data.get("rules", []),
@@ -899,6 +900,16 @@ def getSetProgress() -> SetProgressResponse:
     tracker = getattr(shared_state.gc_ref, 'set_progress_tracker', None) if shared_state.gc_ref else None
     if tracker is None:
         return SetProgressResponse(is_set_based=False)
+    return SetProgressResponse(is_set_based=True, progress=tracker.get_progress())
+
+
+@app.post("/api/set-progress/reset", response_model=SetProgressResponse)
+def resetSetProgress() -> SetProgressResponse:
+    tracker = getattr(shared_state.gc_ref, 'set_progress_tracker', None) if shared_state.gc_ref else None
+    if tracker is None:
+        raise HTTPException(status_code=409, detail="The active sorting profile has no set progress to reset.")
+    tracker.reset()
+    getSetProgressSyncWorker().notify()
     return SetProgressResponse(is_set_based=True, progress=tracker.get_progress())
 
 

@@ -414,6 +414,14 @@ def getBinAssignmentConfig() -> dict[str, Any]:
     return {"allow_multiple_categories_per_bin": allow_multiple}
 
 
+def discardAcceptsOversize() -> bool:
+    """Whether this machine's assigned physical discard opening is larger
+    than the normal layer limit. Defaults to False until physically confirmed.
+    """
+    section = machine_toml.read().get("discard")
+    return isinstance(section, dict) and section.get("accept_oversize") is True
+
+
 def setBinAssignmentConfig(updates: dict[str, Any]) -> dict[str, Any]:
     with machine_toml.edit() as config:
         existing = config.get("bins")

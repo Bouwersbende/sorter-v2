@@ -59,8 +59,43 @@ def _flat_lookup(part_to_category: dict[str, Any], part_id: str, color_id: str) 
     for part in (str(part_id), *base_part_ids(part_id)):
         for key in (f"{color_id}-{part}", f"{ANY_COLOR}-{part}"):
             if key in part_to_category:
-                return str(part_to_category[key])
+                value = part_to_category[key]
+                # Preview and bin auto-assignment cannot know live quota counts.
+                # Show the first destination instead of stringifying the list.
+                if isinstance(value, list):
+                    for tier in value:
+                        if isinstance(tier, dict) and isinstance(tier.get("category_id"), str):
+                            return tier["category_id"]
+                    return None
+                return str(value)
     return None
+
+
+def validatedQuotaTiers(key: str, value: list[Any]) -> list[tuple[str, int]]:
+    tiers: list[tuple[str, int]] = []
+    for tier in value:
+        if not isinstance(tier, dict):
+            raise ValueError(f"invalid quota tier for {key}")
+        category = tier.get("category_id")
+        limit = tier.get("max_count")
+        if (not isinstance(category, str) or not category
+                or type(limit) is not int or limit <= 0):
+            raise ValueError(f"invalid quota tier for {key}")
+        tiers.append((category, limit))
+    if not tiers:
+        raise ValueError(f"empty quota tiers for {key}")
+    return tiers
+
+
+def validateQuotaProfile(data: dict[str, Any]) -> None:
+    if isinstance(data.get("program"), dict):
+        return
+    part_map = data.get("part_to_category") or {}
+    if not isinstance(part_map, dict):
+        raise ValueError("part_to_category must be an object")
+    for key, value in part_map.items():
+        if isinstance(value, list):
+            validatedQuotaTiers(str(key), value)
 
 
 class ProfileRouter:
@@ -218,6 +253,7 @@ class JsonSortingProfile(SortingProfile):
         self._gc = gc
         self._sorting_profile_path = gc.sorting_profile_path
         self.part_to_category: dict[str, str] = {}
+        self.part_quotas: dict[str, list[tuple[str, int]]] = {}
         self.default_category_id = MISC_CATEGORY
         self.set_inventories: dict[str, dict[str, Any]] | None = None
         self.artifact_hash: str = ""
@@ -262,13 +298,19 @@ class JsonSortingProfile(SortingProfile):
         self._loadRuntimeSortingProfile(data)
 
     def _loadRuntimeSortingProfile(self, data: dict) -> None:
+        validateQuotaProfile(data)
         self.default_category_id = str(data.get("default_category_id", MISC_CATEGORY))
         self.part_to_category = {}
+        self.part_quotas = {}
         program = data.get("program")
         self._router = ProfileRouter(program) if isinstance(program, dict) else None
         if self._router is None:
-            for part_id, category_id in (data.get("part_to_category") or {}).items():
-                self.part_to_category[str(part_id)] = str(category_id)
+            for part_id, value in (data.get("part_to_category") or {}).items():
+                key = str(part_id)
+                if isinstance(value, list):
+                    self.part_quotas[key] = validatedQuotaTiers(key, value)
+                else:
+                    self.part_to_category[key] = str(value)
         raw_set_inventories = data.get("set_inventories")
         self.set_inventories = raw_set_inventories if isinstance(raw_set_inventories, dict) else None
         self.artifact_hash = data.get("artifact_hash", "")
@@ -288,8 +330,20 @@ class JsonSortingProfile(SortingProfile):
     def getCategoryIdForPart(self, part_id: str, color_id: str = "any_color") -> str:
         if self._router is not None:
             return self._router.route(part_id, color_id, self._kit_is_full)
-        category = _flat_lookup(self.part_to_category, part_id, color_id)
-        return self.default_category_id if category is None else category
+        for part in (str(part_id), *base_part_ids(part_id)):
+            for key, count_color in ((f"{color_id}-{part}", color_id), (f"{ANY_COLOR}-{part}", None)):
+                tiers = self.part_quotas.get(key)
+                if tiers is not None:
+                    from bin_contents import current_part_counts_by_category
+
+                    counts = current_part_counts_by_category(part, count_color, [category for category, _ in tiers])
+                    for category, limit in tiers:
+                        if counts.get(category, 0) < limit:
+                            return category
+                    return self.default_category_id
+                if key in self.part_to_category:
+                    return self.part_to_category[key]
+        return self.default_category_id
 
     def highValueCategoryId(self, price: Optional[float]) -> Optional[str]:
         cfg = self.high_value_routing

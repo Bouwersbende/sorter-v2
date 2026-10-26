@@ -539,8 +539,8 @@
 		push('Distributing', piece.distributing_at);
 		push('Target bin selected', piece.distribution_target_selected_at);
 		push('Distribution motion', piece.distribution_motion_started_at);
-		push('Positioned over bin', piece.distribution_positioned_at);
-		push('Distributed', piece.distributed_at);
+		push('Controller reported chute positioned', piece.distribution_positioned_at);
+		push('Release recorded (arrival unverified)', piece.distributed_at);
 		// Monotonic sort (floats); preserve original ordering when equal.
 		events.sort((a, b) => a.ts - b.ts);
 		return events;
@@ -618,10 +618,10 @@
 				value: o.category_id ? (sortingProfileStore.getCategoryName(o.category_id) ?? '—') : '—'
 			},
 			{
-				label: 'Bin',
+				label: 'Target bin',
 				value: o.stage ? `${o.bin_label} · ${o.stage}` : o.bin_label,
 				mono: true,
-				title: 'Layer, section and bin the machine put it in (counted from 0)'
+				title: 'Software destination (layer, section, bin, counted from 0); physical arrival is not sensed'
 			}
 		];
 		if (o.value != null) {
@@ -647,14 +647,12 @@
 	// shows `preview_url`.
 	const refImageSrc = $derived<string | null>(piece?.brickognize_preview_url ?? null);
 
-	// Destination bin reads as the discard bin for pieces that were never
-	// identified — they still get routed, just not to a part-specific bin.
+	// An unidentified piece has no known physical destination until the backend
+	// selects one. Do not infer a discard-bin arrival from classification alone.
 	function liveBinLabel(): string {
 		if (piece?.destination_bin) return formatBin(piece.destination_bin);
-		// The live payload may not carry it once the piece is distributed; the
-		// machine's record does.
+		// The durable record can supply a selected target after the live event.
 		if (_summary?.bin) return formatSummaryBin(_summary.bin);
-		if (is_unknown || is_multi_drop) return 'discard bin';
 		return '—';
 	}
 
@@ -755,7 +753,13 @@
 					color_confidence: piece.color_confidence,
 					category_id: piece.category_id,
 					bin_label: liveBinLabel(),
-					stage: piece.stage,
+					stage: piece.stage === 'distributed'
+						? 'release recorded'
+						: piece.distribution_positioned_at
+							? 'controller reported positioned'
+							: piece.stage === 'distributing'
+								? 'aiming'
+								: null,
 					value:
 						typeof (piece.piece_metadata as Record<string, unknown> | undefined)
 							?.moving_avg_price === 'number'
@@ -874,10 +878,12 @@
 			<h1 class="text-xl font-semibold tracking-tight text-ink">Piece {uuid.slice(0, 8)}</h1>
 			<div class="flex flex-wrap items-center gap-2">
 				{#if piece}
-					{#if piece.stage === 'distributed'}
-						<Badge>Distributed</Badge>
+					{#if piece.stage === 'distributed' && piece.destination_bin}
+						<Badge>Release recorded</Badge>
+					{:else if piece.stage === 'distributed'}
+						<Badge tone="warning">No bin recorded</Badge>
 					{:else if piece.stage === 'distributing'}
-						<Badge tone="primary">Distributing</Badge>
+						<Badge tone="primary">Aiming</Badge>
 					{/if}
 					<PieceStatusBadge
 						status={piece.classification_status}
@@ -885,6 +891,11 @@
 						dead={Boolean(piece.dead)}
 					/>
 				{:else if _diskSummary}
+					{#if _diskSummary.recorded_at != null && !_diskSummary.bin}
+						<Badge tone="warning">No bin recorded</Badge>
+					{:else if _diskSummary.recorded_at != null}
+						<Badge>Release recorded</Badge>
+					{/if}
 					<PieceStatusBadge
 						status={_diskSummary.classification_status}
 						dead={Boolean(_diskSummary.dead)}

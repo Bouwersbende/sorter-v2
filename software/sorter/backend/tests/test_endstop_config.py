@@ -18,6 +18,13 @@ class EndstopConfigTests(unittest.TestCase):
     def test_parse_defaults_match_setup_wiring(self) -> None:
         self.assertEqual(DEFAULT_HOME_PIN_CHANNEL, readChuteSettings({}).home_pin_channel)
 
+    def test_legacy_center_is_converted_to_section_start(self) -> None:
+        legacy = readChuteSettings({"chute": {"first_bin_center": 58.23, "pillar_width_deg": 8.88}})
+        self.assertAlmostEqual(legacy.first_bin_center, 58.23)
+        self.assertAlmostEqual(legacy.first_section_offset_deg, 45.45)
+        canonical = readChuteSettings({"chute": {"first_section_offset_deg": 58.23, "section_width_deg": 51.12}})
+        self.assertAlmostEqual(canonical.first_section_offset_deg, 58.23)
+
     def test_a_board_names_its_own_home_input(self) -> None:
         kit = BASICALLY_V1_2_DISTRIBUTION_PROFILE
         defaults = boardDefaults(kit.input_aliases, kit.chute_home_active_high)

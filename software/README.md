@@ -35,6 +35,23 @@ cp machine.example.toml machine.toml
 
 Edit the path in `.env` to match the real path to `machine.toml`.
 
+### One layer with a permanently closed flap
+
+If the only active storage layer has a mechanically fixed closed flap and no
+servo wiring, set this in `machine.toml`:
+
+```toml
+[servo]
+fixed_closed_single_layer = true
+channels = []
+```
+
+Enable only layer 1 in the storage layout. The backend skips servo setup and
+calibration, but still homes and moves the chute. It holds the classification
+channel if another layer is enabled or the physical discard bin is unavailable.
+The fixed closed position is a physical setup assertion; the machine cannot
+sense whether the flap has moved.
+
 
 Camera assignment happens in the UI: open the running frontend and use the Settings → Cameras page to map each OpenCV device index to its role (feeder, classification top/bottom, carousel, etc). The resulting assignments are written back to `machine_params.toml` under `[cameras]`.
 

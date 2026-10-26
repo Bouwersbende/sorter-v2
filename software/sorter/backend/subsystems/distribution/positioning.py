@@ -121,27 +121,12 @@ class Positioning(BaseState):
             self.shared.distribution_positioned_uuid = piece.uuid
 
             if piece.too_big:
-                # Oversize for any real bin — send it down the center of the
-                # chute to the misc bottom bin (open every usable door so it
-                # falls straight through). Never claims a bin, never raises a
-                # no-bin incident.
+                category_id = MISC_CATEGORY
                 self.logger.info(
-                    f"Positioning: piece {piece.uuid} is too big "
-                    f"({piece.max_dimension_mm}mm) — passthrough to misc bottom bin"
+                    f"Positioning: oversized piece {piece.uuid} ({piece.max_dimension_mm}mm) "
+                    "requires the physical discard bin"
                 )
-                self._openAllDoorsForPassthrough()
-                piece.stage = PieceStage.distributing
-                piece.distributing_at = time.time()
-                piece.distribution_target_selected_at = piece.distributing_at
-                piece.category_id = MISC_CATEGORY
-                piece.destination_bin = None
-                piece.updated_at = time.time()
-                self._piece = piece
-                self.event_queue.put(knownObjectToEvent(piece))
-                self._setOccupancyState("positioning.passthrough_too_big")
-                return DistributionState.READY
-
-            if piece.part_id is not None:
+            elif piece.part_id is not None:
                 category_id = self.sorting_profile.getCategoryIdForPart(piece.part_id, piece.color_id)
             else:
                 category_id = MISC_CATEGORY
@@ -149,8 +134,11 @@ class Positioning(BaseState):
             # clears the profile's high_value_routing threshold is rerouted into
             # the configured category (e.g. Yellow/Orange Tiles), so it lands in
             # that category's bin regardless of its normal classification.
-            high_value_category = self.sorting_profile.highValueCategoryId(piece.moving_avg_price)
-            if high_value_category is not None:
+            high_value_category = (
+                self.sorting_profile.highValueCategoryId(piece.moving_avg_price)
+                if not piece.too_big else None
+            )
+            if high_value_category is not None and not piece.too_big:
                 self.logger.info(
                     f"Positioning: piece {piece.uuid} ({piece.part_id}) moving-avg "
                     f"${piece.moving_avg_price} clears high-value threshold — routing to "
@@ -162,43 +150,30 @@ class Positioning(BaseState):
             # classification time via a live BrickLink-id lookup) routes within the
             # parallel not-in-inventory bin pool, sub-sorted by its normal category.
             # Everyone else routes among the normal bins; the pools never mix.
-            route_not_in_inventory = piece.not_in_inventory is True
+            route_not_in_inventory = piece.not_in_inventory is True and category_id != MISC_CATEGORY
             if route_not_in_inventory:
                 self.logger.info(
                     f"Positioning: piece {piece.uuid} ({piece.part_id}) not in active "
                     f"inventory — routing within not-in-inventory bins as {category_id}"
                 )
             if getattr(self.shared, "bucket_passthrough_hold", False):
-                # The classification channel lost an unrouted multi-drop piece
-                # and it may still be riding the platter, about to fall the next
-                # time the channel turns. Closing a layer door now would catch
-                # that piece in this bin. Everything goes to the bucket until the
-                # channel says it is clean again.
+                # A lost multi-drop sibling may fall on any of the next few
+                # turns. Keep every such turn aimed at the physical discard bin.
                 self.logger.warning(
                     f"Positioning: unrouted piece loose on the classification channel — "
-                    f"piece {piece.uuid} passes through to the bucket instead of claiming a bin"
+                    f"routing piece {piece.uuid} to physical discard"
                 )
                 if piece.part_id is not None:
                     notePieceProblem(
                         piece,
                         "bucket_hold",
-                        "Went to misc instead of its bin: a double-feed piece the camera lost was "
-                        "still loose on the channel, so every door stayed open until it had had "
-                        "a couple of turns to fall.",
+                        "Went to discard instead of its bin: a double-feed piece the camera lost "
+                        "was still loose on the channel.",
                     )
-                self._openAllDoorsForPassthrough()
-                piece.stage = PieceStage.distributing
-                piece.distributing_at = time.time()
-                piece.distribution_target_selected_at = piece.distributing_at
-                piece.category_id = category_id
-                piece.destination_bin = None
-                piece.updated_at = time.time()
-                self._piece = piece
-                self.event_queue.put(knownObjectToEvent(piece))
-                self._setOccupancyState("positioning.passthrough_loose_piece")
-                return DistributionState.READY
+                category_id = MISC_CATEGORY
+                route_not_in_inventory = False
 
-            address = self._trainingBinAddress()
+            address = None if category_id == MISC_CATEGORY else self._trainingBinAddress()
             if address is None:
                 address, _ = self._findOrAssignBinForCategory(
                     category_id, not_in_inventory=route_not_in_inventory
@@ -211,58 +186,60 @@ class Positioning(BaseState):
                 # send this piece to the discard bucket.
                 return DistributionState.IDLE
             if address is None:
-                # MISC is the intentional reject/default category. It should
-                # pass through to the bottom tray without claiming a real bin
-                # and without raising the operator no-bin incident.
-                if (
-                    category_id != MISC_CATEGORY
-                    and not self._consumeNoBinPassthroughApproval(piece)
-                    and self._raiseNoBinAvailableIncident(piece, category_id)
-                ):
-                    self._setOccupancyState("positioning.no_bin_incident")
-                    return DistributionState.IDLE
-                # Pass-through: no bin available for this category. Open
-                # every usable layer door so the piece falls straight
-                # through to the bottom tray. Finalize the piece record
-                # via SENDING so stats/events stay consistent.
-                self.logger.warning(
-                    f"Positioning: no bin for category {category_id} — passthrough to bottom"
-                )
-                self._raiseBinsFullAlert(category_id)
-                self._openAllDoorsForPassthrough()
-                piece.stage = PieceStage.distributing
-                piece.distributing_at = time.time()
-                piece.distribution_target_selected_at = piece.distributing_at
-                piece.category_id = category_id
-                piece.destination_bin = None
-                piece.updated_at = time.time()
-                self._piece = piece
-                self.event_queue.put(knownObjectToEvent(piece))
-                self._setOccupancyState("positioning.passthrough_no_bin")
-                return DistributionState.READY
+                # Never release a piece to the bottom bucket when discard has
+                # no usable bin. Keep the distribution gate closed for an operator.
+                self.logger.warning(f"Positioning: no physical bin for {category_id}; holding piece")
+                self._raiseNoBinAvailableIncident(piece, category_id)
+                self._setOccupancyState("positioning.no_bin_incident")
+                return DistributionState.IDLE
+
+            # A category without a usable assigned bin may have fallen back to
+            # the physical MISC bin. Record what was actually selected.
+            try:
+                selected_bin = self.layout.layers[address.layer_index].sections[
+                    address.section_index
+                ].bins[address.bin_index]
+            except (AttributeError, IndexError):
+                selected_bin = None
+            if (
+                selected_bin is not None
+                and MISC_CATEGORY in selected_bin.category_ids
+                and category_id != MISC_CATEGORY
+            ):
+                category_id = MISC_CATEGORY
 
             if self._exceedsLayerMaxDimension(piece, address.layer_index):
-                # The piece fits a real bin by category, but is physically too
-                # large for that bin's layer. Reroute it to the misc bottom bin
-                # (center-of-chute passthrough) and mark why.
                 layer_max = self._layerMaxDimensionMm(address.layer_index)
-                self.logger.info(
-                    f"Positioning: piece {piece.uuid} ({piece.max_dimension_mm}mm) exceeds "
-                    f"layer {address.layer_index} limit ({layer_max}mm) — passthrough to misc bottom bin"
-                )
-                self._openAllDoorsForPassthrough()
-                piece.stage = PieceStage.distributing
-                piece.distributing_at = time.time()
-                piece.distribution_target_selected_at = piece.distributing_at
-                piece.category_id = MISC_CATEGORY
-                piece.destination_bin = None
                 piece.too_big_for_layer = True
                 piece.intended_layer_index = address.layer_index
-                piece.updated_at = time.time()
-                self._piece = piece
-                self.event_queue.put(knownObjectToEvent(piece))
-                self._setOccupancyState("positioning.passthrough_too_big_for_layer")
-                return DistributionState.READY
+                if category_id != MISC_CATEGORY:
+                    discard_address, _ = self._findOrAssignBinForCategory(MISC_CATEGORY)
+                    if discard_address is not None and self._discardAcceptsPiece(
+                        piece, discard_address.layer_index
+                    ):
+                        address = discard_address
+                        category_id = MISC_CATEGORY
+                    else:
+                        self.logger.warning(
+                            f"Positioning: piece {piece.uuid} ({piece.max_dimension_mm}mm) "
+                            "cannot fit its bin or the discard bin; holding piece"
+                        )
+                        self._raiseNoBinAvailableIncident(piece, MISC_CATEGORY)
+                        self._setOccupancyState("positioning.discard_too_small")
+                        return DistributionState.IDLE
+                elif not self._discardAcceptsPiece(piece, address.layer_index):
+                    self.logger.warning(
+                        f"Positioning: piece {piece.uuid} ({piece.max_dimension_mm}mm) "
+                        f"exceeds discard layer limit ({layer_max}mm); holding piece"
+                    )
+                    self._raiseNoBinAvailableIncident(piece, MISC_CATEGORY)
+                    self._setOccupancyState("positioning.discard_too_small")
+                    return DistributionState.IDLE
+                else:
+                    self.logger.info(
+                        f"Positioning: physical discard accepts oversized piece {piece.uuid} "
+                        f"({piece.max_dimension_mm}mm) despite layer limit {layer_max}mm"
+                    )
 
             self.logger.info(
                 f"Positioning: moving to bin at layer={address.layer_index}, section={address.section_index}, bin={address.bin_index}"
@@ -387,6 +364,13 @@ class Positioning(BaseState):
             return False
         return float(piece_max) > layer_max
 
+    def _discardAcceptsPiece(self, piece, layer_index: int) -> bool:
+        if not self._exceedsLayerMaxDimension(piece, layer_index):
+            return True
+        from toml_config import discardAcceptsOversize
+
+        return discardAcceptsOversize()
+
     def _isLayerUsable(self, layer_index: int) -> bool:
         """Check whether this layer is currently usable for a sort move.
 
@@ -398,6 +382,13 @@ class Positioning(BaseState):
         no-op gate but gets cleared automatically once the servo reports
         healthy again.
         """
+        if getattr(self.gc, "fixed_closed_single_layer", False):
+            from irl.bin_layout import fixedClosedSingleLayerReady
+
+            if layer_index != 0 or not fixedClosedSingleLayerReady(self.layout):
+                self._markLayerUnavailable(layer_index, "fixed closed flap mode requires only layer 1")
+                return False
+            return True
         if self.gc.disable_servos:
             return True
         if layer_index >= len(self.irl.servos):
@@ -476,24 +467,8 @@ class Positioning(BaseState):
             )
             return False
 
-    def _raiseBinsFullAlert(self, category_id: str) -> None:
-        return
-
-    def _consumeNoBinPassthroughApproval(self, piece) -> bool:
-        consumer = getattr(shared_state, "consumeDistributionNoBinPassthrough", None)
-        if not callable(consumer):
-            return False
-        try:
-            return bool(consumer(getattr(piece, "uuid", None)))
-        except Exception:
-            return False
-
     def _raiseNoBinAvailableIncident(self, piece, category_id: str) -> bool:
-        """Publish no-bin as an explicit operator incident.
-
-        When this incident kind is disabled, the legacy passthrough path below
-        remains available as an intentional operating choice.
-        """
+        """Hold the piece and publish an operator incident."""
         piece_uuid = str(getattr(piece, "uuid", "") or "")
         return self._publishDistributionIncident(
             DISTRIBUTION_NO_BIN_AVAILABLE_INCIDENT_KIND,
@@ -506,10 +481,11 @@ class Positioning(BaseState):
             piece_short=piece_uuid[:8],
             part_id=getattr(piece, "part_id", None),
             color_id=getattr(piece, "color_id", None),
-            resolution="operator_assign_bin_or_clear_to_approve_one_shot_passthrough",
+            resolution="operator_assign_or_clear_physical_discard_bin",
             operator_message=(
-                "No matching bin is available. Assign a bin, free capacity, or clear the incident to pass this piece through once."
+                "No usable physical bin is available. Assign or clear the discard bin, then retry."
             ),
+            force=True,
         )
 
     def _allEnabledLayersServoOffline(self) -> bool:
@@ -596,9 +572,10 @@ class Positioning(BaseState):
         severity: str,
         role: str,
         channel_label: str,
+        force: bool = False,
         **extra,
     ) -> bool:
-        if _incidentHandlingOff(kind):
+        if not force and _incidentHandlingOff(kind):
             return False
         runtime_stats = getattr(self.gc, "runtime_stats", None)
         if runtime_stats is None or not hasattr(runtime_stats, "setActiveIncident"):
@@ -659,36 +636,9 @@ class Positioning(BaseState):
         except Exception:
             pass
 
-    def _openAllDoorsForPassthrough(self) -> None:
-        """Open every usable layer door so a piece with no assigned bin
-        falls straight through to the bottom tray. A follow-up
-        ``_selectDoor`` on the next piece will re-close the appropriate
-        layer.
-
-        Like ``_selectDoor``, this re-issues the open on every door rather than
-        consulting the servo's shadow angle. The shadow is set even when the
-        firmware rejects a move (``ServoMotor.move_to_and_release``), so a door
-        the software believes is open can physically be closed — and the
-        shadow-gated version would then never correct it, quietly dropping the
-        bucket's pieces into that layer's bin.
-        """
-        if self.gc.disable_servos:
-            return
-        for i, servo in enumerate(self.irl.servos):
-            if not self._isLayerUsable(i):
-                continue
-            try:
-                if hasattr(servo, "apply_open_speed"):
-                    servo.apply_open_speed()
-                if not servo.open():
-                    self._markLayerUnavailable(i, "its servo refused to open for passthrough")
-            except Exception as exc:
-                self._markLayerUnavailable(
-                    i,
-                    f"opening for passthrough failed: {exc}",
-                )
-
     def _selectDoor(self, target_layer_index: int) -> bool:
+        if getattr(self.gc, "fixed_closed_single_layer", False):
+            return self._isLayerUsable(target_layer_index)
         if self.gc.disable_servos:
             return True
         if not self._isLayerUsable(target_layer_index):
@@ -831,11 +781,7 @@ class Positioning(BaseState):
                         continue
                     count = piece_counts.get((layer_idx, section_idx, bin_idx), 0)
                     is_full = max_per_bin is not None and count >= max_per_bin
-                    if (
-                        category_id != MISC_CATEGORY
-                        and category_id in b.category_ids
-                        and not is_full
-                    ):
+                    if category_id in b.category_ids and not is_full:
                         matching_candidates.append(address)
                         continue
                     if b.category_ids:
@@ -876,10 +822,8 @@ class Positioning(BaseState):
         if matching_candidates:
             return random.choice(matching_candidates), False
 
-        # MISC must never claim or use a real bin. The discard bucket below
-        # the chute (rendered in the UI as the virtual Discard Bin) is what
-        # catches misc passthrough; treating MISC as a physical bin category
-        # silently swaps that behavior.
+        # MISC uses a physical bin only when the operator explicitly assigned
+        # one. Never claim an empty bin for it automatically.
         if first_unassigned is not None and category_id != MISC_CATEGORY:
             address, b = first_unassigned
             b.category_ids = [category_id]
@@ -909,16 +853,15 @@ class Positioning(BaseState):
             )
             return address, True
 
-        if category_id != MISC_CATEGORY and not not_in_inventory:
+        if category_id != MISC_CATEGORY:
             # No bin slot available for this category; fall back to MISC,
             # which will only succeed if the operator pre-assigned a bin
-            # to MISC. Otherwise it returns None and the piece passes
-            # through to the discard bucket. Not-in-inventory pieces never fall
-            # back to a normal MISC bin — they stay in their pool or pass through.
+            # to MISC. Otherwise it returns None and positioning holds the
+            # piece. Rejected not-in-inventory pieces also use physical MISC.
             return self._findOrAssignBinForCategory(MISC_CATEGORY)
 
         self.logger.info(
-            f"Positioning: MISC has no assigned bin — passthrough to discard bucket "
+            f"Positioning: MISC has no usable assigned bin — holding piece "
             f"(enabled_layers={enabled_layers}, blocked={blocked_layer_idxs}, "
             f"unreachable_bins={unreachable_bins}, full_bins={full_bins}, "
             f"bins_with_cats={bins_with_cats}, skipped={skipped})"

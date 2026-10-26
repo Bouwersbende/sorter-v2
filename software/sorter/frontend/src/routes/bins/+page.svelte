@@ -759,7 +759,7 @@
 							'contents/clear',
 							'all',
 							{},
-							'Please make sure all physical bins are empty first. This will mark every bin on the machine as emptied, but keep the current profile-to-bin assignments in place.',
+							'Please make sure all physical bins are empty first. This clears the recorded contents of every bin and keeps their assignments. Set progress is tracked separately and will not reset.',
 							'empty-all'
 						)}
 					onResetAll={() =>
@@ -886,7 +886,7 @@
 							'contents/clear',
 							'layer',
 							{ layer_index: layer.layer_index },
-							`Please make sure layer ${layer.layer_index + 1} is physically empty first. This will mark all bins on that layer as emptied, but keep their assignments.`,
+							`Please make sure layer ${layer.layer_index + 1} is physically empty first. This clears the recorded contents of the layer and keeps its assignments. Set progress is tracked separately and will not reset.`,
 							`empty-layer-${layer.layer_index}`
 						)}
 					onResetLayer={() =>
@@ -912,7 +912,7 @@
 							'contents/clear',
 							'bin',
 							{ layer_index: layer.layer_index, section_index: bin.section_index, bin_index: bin.bin_index },
-							`Please make sure bin ${bin.global_index + 1} is physically empty first. This will mark the bin as emptied but keep its assignment.`,
+							`Please make sure bin ${bin.global_index + 1} is physically empty first. This clears its recorded contents and keeps its assignment. Set progress is tracked separately and will not reset.`,
 							`empty-bin-${layer.layer_index}-${bin.section_index}-${bin.bin_index}`
 						)}
 					onResetBin={(bin) =>
@@ -926,7 +926,7 @@
 				/>
 			{/each}
 
-			<DiscardBinCard />
+			<DiscardBinCard assignedBin={layers.flatMap((layer) => layer.bins).find((bin) => bin.category_ids.includes('misc'))} />
 		{/if}
 	</div>
 </AppShell>

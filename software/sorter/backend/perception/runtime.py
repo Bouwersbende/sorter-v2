@@ -5,7 +5,7 @@ Wraps the existing RKNN runtime in ``vision/ml/rknn.py`` so the
 at construction time. No role-string dispatch, no shared dict, no first-
 call build race.
 
-Two concrete runtimes:
+Concrete runtimes:
 - ``RknnYoloRuntime`` — production path on RK3588. Wraps
   ``vision.ml.rknn.RknnYoloProcessor`` with a fixed core mask passed in
   at construction. Each ``InferenceWorker`` owns one and only one of
@@ -13,6 +13,7 @@ Two concrete runtimes:
 - ``StubRuntime`` — test path on the Mac. Returns whatever bboxes the
   test handed in. Used by ``test_no_camera_crossover.py`` and any other
   unit test that wants to exercise the worker without hardware.
+- ``OnnxYoloRuntime`` — ONNX path for PCs and ONNX model variants.
 
 The ``InferenceRuntime`` protocol is what the ``InferenceWorker`` reads
 through. Keeping it narrow (one method: ``infer(bgr) -> list[Bbox]``)
@@ -139,6 +140,35 @@ class RknnYoloRuntime:
                 ((int(b[0]), int(b[1]), int(b[2]), int(b[3])), float(d.score))
             )
         return out
+
+
+class OnnxYoloRuntime(RknnYoloRuntime):
+    """YOLO ONNX adapter with the same worker interface as the RKNN adapter."""
+
+    __slots__ = ()
+
+    def __init__(
+        self,
+        *,
+        model_path,
+        imgsz: int,
+        core_mask_name: str,
+        conf_threshold: float = 0.25,
+        iou_threshold: float = 0.45,
+    ) -> None:
+        from vision.ml.onnx import OnnxYoloProcessor
+
+        self._core_mask_name = core_mask_name
+        self._model_path = model_path
+        self._imgsz = int(imgsz)
+        self._conf_threshold = float(conf_threshold)
+        self._iou_threshold = float(iou_threshold)
+        self._processor = OnnxYoloProcessor(
+            model_path=model_path,
+            imgsz=imgsz,
+            conf_threshold=conf_threshold,
+            iou_threshold=iou_threshold,
+        )
 
 
 class StubRuntime:

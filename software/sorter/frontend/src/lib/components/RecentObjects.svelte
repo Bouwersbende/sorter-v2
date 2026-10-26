@@ -30,7 +30,7 @@
 	// but the piece hasn't been delivered yet. The chip for it comes from
 	// PieceStatusBadge so a failed/unidentified piece can never read as the green
 	// success chip — the green is gated on classification_status === 'classified'.
-	type LifecyclePhase = 'tracking' | 'capturing' | 'resolved' | 'distributed';
+	type LifecyclePhase = 'tracking' | 'capturing' | 'resolved' | 'distributed' | 'unrouted';
 
 	const MAX_DELIVERED_PIECES = 8;
 	const RECENT_TERMINAL_DEDUPE_WINDOW_S = 15;
@@ -185,9 +185,9 @@
 	}
 
 	function lifecyclePhase(obj: KnownObjectData): LifecyclePhase {
-		// "Distributing" (in motion) still renders as resolved. Only fully-
-		// delivered pieces flip to 'distributed'.
-		if (isTerminalObject(obj)) return 'distributed';
+		// A terminal event records the release, not physical arrival in a bin.
+		// Old records can have no destination at all; never label those as routed.
+		if (isTerminalObject(obj)) return obj.destination_bin ? 'distributed' : 'unrouted';
 		if (isResolvedStatus(obj.classification_status) || obj.classified_at) {
 			return 'resolved';
 		}
@@ -570,7 +570,8 @@
 		// 'resolved' never lands here: it renders as PieceStatusBadge instead.
 		if (phase === 'tracking') return { label: 'Tracking', tone: 'neutral' };
 		if (phase === 'capturing') return { label: 'Capturing', tone: 'primary' };
-		return { label: 'Distributed', tone: 'neutral' };
+		if (phase === 'unrouted') return { label: 'No bin recorded', tone: 'neutral' };
+		return { label: 'Release recorded', tone: 'neutral' };
 	}
 
 	// --- Multi-drop grouping ----------------------------------------------
@@ -676,7 +677,7 @@
 	{@const show_cycle = view.cycling && cycle_src != null && cycle_src !== base_src}
 	<!-- A finished piece with no picture and no name has one line to say: half
 	     a row, its status badge where the other rows start theirs. -->
-	{@const compact = phase === 'distributed' && !base_src && !cycle_src && !has_name}
+	{@const compact = (phase === 'distributed' || phase === 'unrouted') && !base_src && !cycle_src && !has_name}
 
 	<a
 		href={`/tracked/${obj.uuid}`}
@@ -695,7 +696,7 @@
 						requestFailed={Boolean(obj.request_failed)}
 					/>
 					<span class="num ml-auto shrink-0 text-sm text-ink-muted">
-						{obj.destination_bin ? `Discard ${formatBin(obj.destination_bin)}` : 'Discard bin'}
+						{obj.destination_bin ? `Target ${formatBin(obj.destination_bin)}` : 'No bin recorded'}
 					</span>
 				</div>
 			</div>
@@ -724,7 +725,7 @@
 									: 'opacity-0'}"
 							/>
 						{/if}
-					{:else if phase === 'distributed'}
+					{:else if phase === 'distributed' || phase === 'unrouted'}
 						<!-- Terminal piece with nothing to show — a spinner here would imply
 						     waiting. -->
 						<div class="flex h-full w-full items-center justify-center">
@@ -799,7 +800,7 @@
 					<div class="mt-0.5 flex flex-wrap items-center gap-1.5">
 						<!-- The classification outcome renders through the shared badge;
 						     the green one is impossible for failed or unidentified pieces. -->
-						{#if phase === 'resolved' || (phase === 'distributed' && obj.classification_status !== 'classified')}
+						{#if phase === 'resolved' || ((phase === 'distributed' || phase === 'unrouted') && obj.classification_status !== 'classified')}
 							<PieceStatusBadge
 								status={obj.classification_status}
 								requestFailed={Boolean(obj.request_failed)}
@@ -813,8 +814,8 @@
 							<span
 								class="inline-flex"
 								title={obj.too_big_for_layer && typeof obj.intended_layer_index === 'number'
-									? `Too big for layer ${obj.intended_layer_index + 1}: sent to the misc bottom bin`
-									: 'Too big: sent to the misc bottom bin'}
+									? `Too big for layer ${obj.intended_layer_index + 1}: target is the configured discard bin`
+									: 'Too big: target is the configured discard bin'}
 							>
 								<Badge tone="warning"
 									>{too_big_label}{typeof obj.max_dimension_mm === 'number'
@@ -865,14 +866,12 @@
 							<span class="text-sm text-ink-muted">{cat_name}</span>
 						{/if}
 
-						{#if obj.destination_bin && phase === 'distributed'}
-							<span class="num ml-auto text-sm text-ink">
-								{is_unknown || is_multi_drop || is_too_big ? 'Discard ' : ''}{formatBin(
-									obj.destination_bin
-								)}
+						{#if obj.destination_bin}
+							<span class="num ml-auto text-sm text-ink" title="Software target; physical arrival is not sensed">
+								Target {formatBin(obj.destination_bin)}
 							</span>
-						{:else if phase === 'distributed' && (is_unknown || is_multi_drop || is_too_big)}
-							<span class="ml-auto text-sm text-ink-muted">Discard bin</span>
+						{:else if phase === 'unrouted'}
+							<span class="ml-auto text-sm text-ink-muted">No bin recorded</span>
 						{/if}
 					</div>
 				</div>
@@ -928,8 +927,10 @@
 						<Badge>Rejected</Badge>
 					</span>
 				</div>
-				{#if phase === 'distributed'}
-					<span class="ml-auto shrink-0 text-sm text-ink-muted">Discard bin</span>
+				{#if phase === 'distributed' || phase === 'unrouted'}
+					<span class="ml-auto shrink-0 text-sm text-ink-muted">
+						{obj.destination_bin ? `Target ${formatBin(obj.destination_bin)}` : 'No bin recorded'}
+					</span>
 				{/if}
 			</div>
 		</div>
@@ -951,7 +952,7 @@
 			{/each}
 
 			<!-- The exit: what is below it has left the channel, newest first. -->
-			<div class="label px-3 py-1.5 select-none">Distributed</div>
+			<div class="label px-3 py-1.5 select-none" title="The software records a release and target bin; it has no sensor to confirm arrival in the bin">Recent release records</div>
 
 			{#each deliveredRows as row (rowKey(row))}
 				{#if row.kind === 'multi_drop'}

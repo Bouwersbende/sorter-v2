@@ -12,7 +12,7 @@ from unittest.mock import patch
 from hardware.bus import MCUBusError
 from hardware.fault import HardwareFault
 from hardware_settings.motors import motorNamed
-from hardware_settings.steppers import readStepperSettings
+from hardware_settings.steppers import driverUartEnabled, readStepperSettings
 from irl.config import IRLInterface, _TMC_REG_IFCNT, _bindHardware, _configureStepper
 from machine_platform.control_board import BoardIdentity, DiscoveredStepper
 
@@ -92,12 +92,18 @@ class _Driver:
 _STEPPER_CONFIG = SimpleNamespace(default_steps_per_second=3000, acceleration_microsteps_per_second_sq=20000)
 
 
-def _configure(driver: _Driver, *, no_power: bool = False, stallguard: bool = True) -> None:
+def _configure(
+    driver: _Driver, *, no_power: bool = False, stallguard: bool = True,
+    driver_uart: bool = True,
+) -> None:
     gc = SimpleNamespace(logger=_Logger(), no_power_development_mode=no_power)
     chute = motorNamed("chute")
     saved = {"stepper_stallguard": {"chute_stepper": {"sgthrs": 60, "tcoolthrs": 0x3FF, "enabled": stallguard}}}
     with patch("irl.config.time.sleep"):
-        _configureStepper(gc, driver, chute, _STEPPER_CONFIG, readStepperSettings(chute, saved))
+        _configureStepper(
+            gc, driver, chute, _STEPPER_CONFIG, readStepperSettings(chute, saved),
+            driver_uart=driver_uart,
+        )
 
 
 class StepperInitTests(unittest.TestCase):
@@ -120,6 +126,21 @@ class StepperInitTests(unittest.TestCase):
             _configure(_Driver(answers=False))
         self.assertEqual("Stepper setup failed", caught.exception.title)
         self.assertIn("motor power", caught.exception.message)
+
+    def test_external_step_dir_chute_keeps_motion_setup_without_uart_readback(self) -> None:
+        driver = _Driver(answers=False, diag_pin=False)
+        _configure(driver, driver_uart=False)
+        self.assertEqual((250 + 3) % 256, driver.ifcnt)
+        self.assertFalse(driver.stallguard_enabled)
+        self.assertFalse(driver.detection_on)
+
+    def test_external_driver_mode_must_be_explicit_for_the_chute(self) -> None:
+        chute = motorNamed("chute")
+        carousel = motorNamed("carousel")
+        config = {"stepper_driver_uart": {"chute_stepper": False}}
+        self.assertFalse(driverUartEnabled(chute, config))
+        self.assertTrue(driverUartEnabled(carousel, config))
+        self.assertTrue(driverUartEnabled(chute, {"stepper_driver_uart": {"chute_stepper": "false"}}))
 
     def test_stall_detection_that_cannot_be_armed_stops_init(self) -> None:
         with self.assertRaises(HardwareFault) as caught:
@@ -180,12 +201,12 @@ class _SteppersBound(Exception):
     pass
 
 
-def _bindSteppers(boards: list[_Board]) -> IRLInterface:
+def _bindSteppers(boards: list[_Board], machine_params: dict | None = None) -> IRLInterface:
     """Runs hardware init over the boards up to the end of stepper binding."""
     gc = SimpleNamespace(logger=_Logger(), no_power_development_mode=False)
     irl = IRLInterface()
     with (
-        patch("irl.config.loadMachineSpecificParams", return_value={}),
+        patch("irl.config.loadMachineSpecificParams", return_value=machine_params or {}),
         patch("irl.config.loadServoChannelConfig", return_value=None),
         patch("irl.config.MCUBus.enumerate_buses", return_value=[]),
         patch("irl.config.discover_control_boards", return_value=boards),
@@ -201,6 +222,25 @@ def _bindSteppers(boards: list[_Board]) -> IRLInterface:
 
 
 class SpareChannelTests(unittest.TestCase):
+    def test_only_explicit_external_chute_skips_driver_readback(self) -> None:
+        chute = _Driver(answers=False, diag_pin=False)
+        feeder = _Board(
+            "feeder",
+            [
+                ("carousel", "carousel", _Driver()),
+                ("third_c_channel_rotor", "c_channel_3_rotor", _Driver()),
+                ("second_c_channel_rotor", "c_channel_2_rotor", _Driver()),
+                ("first_c_channel_rotor", "c_channel_1_rotor", _Driver()),
+            ],
+        )
+        distribution = _Board("distribution", [("chute_stepper", "chute_stepper", chute)])
+        irl = _bindSteppers(
+            [feeder, distribution],
+            {"stepper_driver_uart": {"chute_stepper": False}},
+        )
+        self.assertIs(irl.chute_stepper, chute)
+        self.assertFalse(chute.stallguard_enabled)
+
     def test_two_v1_1_boards_with_empty_aux_sockets_home(self) -> None:
         # A machine on two basically V1-1 boards: the distribution board drives
         # only the chute, and its three aux sockets hold no driver.

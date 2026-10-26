@@ -107,12 +107,10 @@ KINDS: dict[str, IncidentKind] = {
         IncidentKind(
             "distribution_no_bin_available",
             title="No bin for this piece",
-            todo="No bin takes this piece. Assign a bin or free one up, or send it to the bucket.",
-            actions=("pass_through",),
+            todo="No usable physical bin takes this piece. Assign or clear the discard bin, then retry.",
+            actions=("retry_bin",),
             scope="Distribution",
-            description="No bin is assigned for a piece, or every one that fits is full.",
-            default_handling=OFF,
-            off_label="Send such pieces to the bucket",
+            description="No bin is assigned for a piece, or every one that fits is full. The piece is held.",
         ),
     )
 }

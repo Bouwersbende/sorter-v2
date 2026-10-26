@@ -37,6 +37,19 @@ CHANGEABLE = GEOMETRY + LEGACY_GEOMETRY + (
 )
 
 
+def _first_section_bin_count() -> int:
+    from irl.bin_layout import getBinLayout
+
+    for layer in getBinLayout().layers:
+        if layer.sections:
+            return max(1, len(layer.sections[0]))
+    return 1
+
+
+def _half_first_slot(section_width_deg: float) -> float:
+    return section_width_deg / (2 * _first_section_bin_count())
+
+
 @dataclass(frozen=True)
 class ChuteSettings:
     num_sections: int
@@ -55,6 +68,10 @@ class ChuteSettings:
     @property
     def pillar_width_deg(self) -> float:
         return self.section_pitch_deg - self.section_width_deg
+
+    @property
+    def first_bin_center(self) -> float:
+        return self.first_section_offset_deg + _half_first_slot(self.section_width_deg)
 
     def describe(self) -> str:
         return (
@@ -128,7 +145,7 @@ def readChuteSettings(
     if "first_section_offset_deg" in raw:
         offset = float(read("first_section_offset_deg", first_bin_center, _isNumber, "a number"))
     else:
-        offset = first_bin_center
+        offset = first_bin_center - _half_first_slot(section_width) if "first_bin_center" in saved else first_bin_center
         if "first_bin_center" in saved:
             saved.add("first_section_offset_deg")
     saved -= set(LEGACY_GEOMETRY)
@@ -173,7 +190,8 @@ def saveChuteSettings(
             if not (_isNumber(pillar) and 0 <= pillar < pitch):
                 raise ValueError(f"pillar_width_deg must be from 0 to under the section pitch, {pitch:g}°.")
             width = pitch - pillar
-            offset = changes.get("first_bin_center", offset)
+            if "first_bin_center" in changes:
+                offset = changes["first_bin_center"] - _half_first_slot(float(width))
         if not (_isNumber(width) and 0 < width < pitch):
             raise ValueError(f"section_width_deg must be over 0 and under the section pitch, {pitch:g}°.")
         if not _isNumber(offset):
@@ -195,7 +213,7 @@ def saveChuteSettings(
                 section_width_deg=round(float(width), 4),
                 first_section_offset_deg=round(float(offset), 4),
                 pillar_width_deg=round(pitch - float(width), 4),
-                first_bin_center=round(float(offset), 4),
+                first_bin_center=round(float(offset) + _half_first_slot(float(width)), 4),
             )
         if polarity is not None:
             chute["endstop_active_high"] = polarity

@@ -21,7 +21,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from defs.events import PauseCommandEvent
-from defs.known_object import KnownObject
+from defs.known_object import ClassificationStatus, KnownObject
 from irl.bin_layout import Bin, BinSection, BinSize, DistributionLayout, Layer
 from runtime_stats import RuntimeStatsCollector
 from server import shared_state
@@ -109,7 +109,6 @@ class ServoBusFatalTests(unittest.TestCase):
         self._saved_queue = shared_state.command_queue
         shared_state.hardware_error = None
         shared_state.hardware_state = "standby"
-        shared_state.distribution_no_bin_passthrough_approvals.clear()
         self.cmd_queue: queue.Queue = queue.Queue()
         shared_state.command_queue = self.cmd_queue
 
@@ -265,23 +264,21 @@ class ServoBusFatalTests(unittest.TestCase):
         self.assertEqual("cat_missing", snap["active_incident"]["category_id"])
         self.assertEqual("positioning.no_bin_incident", positioning._occupancy_state)
 
-    def test_no_bin_clear_approval_allows_one_shot_passthrough(self) -> None:
+    def test_no_bin_holds_piece_until_physical_discard_is_available(self) -> None:
         piece = _mk_piece()
         positioning = self._mk_positioning(
             servos=[_mk_healthy_servo()],
             sorting_profile=_AllCategoriesProfile("cat_missing"),
             piece=piece,
         )
-        shared_state.approveDistributionNoBinPassthrough(piece.uuid)
-
         next_state = positioning.step()
 
-        self.assertEqual(DistributionState.READY, next_state)
-        self.assertIsNone(self.runtime_stats.snapshot().get("active_incident"))
-        self.assertEqual("positioning.passthrough_no_bin", positioning._occupancy_state)
-        self.assertEqual(set(), shared_state.distribution_no_bin_passthrough_approvals)
+        self.assertEqual(DistributionState.IDLE, next_state)
+        self.assertIsNotNone(self.runtime_stats.snapshot().get("active_incident"))
+        self.assertEqual("positioning.no_bin_incident", positioning._occupancy_state)
+        positioning.chute.moveToBin.assert_not_called()
 
-    def test_misc_without_assigned_bin_passes_through_without_incident(self) -> None:
+    def test_misc_without_assigned_bin_holds_piece(self) -> None:
         servo = _mk_healthy_servo()
         positioning = self._mk_positioning(
             servos=[servo],
@@ -290,12 +287,12 @@ class ServoBusFatalTests(unittest.TestCase):
 
         next_state = positioning.step()
 
-        self.assertEqual(DistributionState.READY, next_state)
-        self.assertIsNone(self.runtime_stats.snapshot().get("active_incident"))
-        self.assertEqual("positioning.passthrough_no_bin", positioning._occupancy_state)
-        servo.open.assert_called_once()
+        self.assertEqual(DistributionState.IDLE, next_state)
+        self.assertIsNotNone(self.runtime_stats.snapshot().get("active_incident"))
+        self.assertEqual("positioning.no_bin_incident", positioning._occupancy_state)
+        servo.open.assert_not_called()
 
-    def test_misc_assigned_bin_is_ignored_for_bottom_passthrough(self) -> None:
+    def test_misc_assigned_bin_routes_to_physical_bin(self) -> None:
         servo = _mk_healthy_servo()
         section = BinSection(bins=[Bin(size=BinSize.MEDIUM, category_ids=[MISC_CATEGORY])])
         layer = Layer(sections=[section])
@@ -309,12 +306,118 @@ class ServoBusFatalTests(unittest.TestCase):
 
         next_state = positioning.step()
 
-        self.assertEqual(DistributionState.READY, next_state)
+        self.assertIsNone(next_state)
         self.assertIsNone(self.runtime_stats.snapshot().get("active_incident"))
-        self.assertIsNone(positioning._piece.destination_bin)
-        self.assertEqual("positioning.passthrough_no_bin", positioning._occupancy_state)
+        self.assertEqual((0, 0, 0), positioning._piece.destination_bin)
+        positioning.chute.moveToBin.assert_called_once()
+
+    def test_unidentified_and_multi_drop_rejects_use_assigned_misc_bin(self) -> None:
+        for status in (ClassificationStatus.unknown, ClassificationStatus.multi_drop_fail):
+            with self.subTest(status=status):
+                servo = _mk_healthy_servo()
+                section = BinSection(bins=[Bin(size=BinSize.MEDIUM, category_ids=[MISC_CATEGORY])])
+                layout = DistributionLayout(layers=[Layer(sections=[section])])
+                piece = KnownObject(part_id=None, classification_status=status)
+                positioning = self._mk_positioning(servos=[servo], layout=layout, piece=piece)
+
+                self.assertIsNone(positioning.step())
+                self.assertEqual(MISC_CATEGORY, piece.category_id)
+                self.assertEqual((0, 0, 0), piece.destination_bin)
+                positioning.chute.moveToBin.assert_called_once()
+
+    def test_unassigned_category_uses_physical_misc_bin(self) -> None:
+        servo = _mk_healthy_servo()
+        section = BinSection(bins=[Bin(size=BinSize.MEDIUM, category_ids=[MISC_CATEGORY])])
+        layout = DistributionLayout(layers=[Layer(sections=[section])])
+        positioning = self._mk_positioning(
+            servos=[servo], layout=layout, sorting_profile=_AllCategoriesProfile("no-bin")
+        )
+
+        self.assertIsNone(positioning.step())
+        self.assertEqual((0, 0, 0), positioning._piece.destination_bin)
+        self.assertEqual(MISC_CATEGORY, positioning._piece.category_id)
+        positioning.chute.moveToBin.assert_called_once()
+
+    def test_not_in_inventory_reject_uses_physical_misc_bin(self) -> None:
+        servo = _mk_healthy_servo()
+        section = BinSection(bins=[Bin(size=BinSize.MEDIUM, category_ids=[MISC_CATEGORY])])
+        layout = DistributionLayout(layers=[Layer(sections=[section])])
+        piece = _mk_piece()
+        piece.not_in_inventory = True
+        positioning = self._mk_positioning(
+            servos=[servo], layout=layout, piece=piece,
+            sorting_profile=_AllCategoriesProfile("no-bin"),
+        )
+
+        self.assertIsNone(positioning.step())
+        self.assertEqual((0, 0, 0), piece.destination_bin)
+        self.assertEqual(MISC_CATEGORY, piece.category_id)
+
+    def test_oversize_uses_physical_misc_bin_when_it_fits(self) -> None:
+        servo = _mk_healthy_servo()
+        section = BinSection(bins=[Bin(size=BinSize.MEDIUM, category_ids=[MISC_CATEGORY])])
+        layout = DistributionLayout(layers=[Layer(sections=[section])])
+        piece = _mk_piece()
+        piece.too_big = True
+        positioning = self._mk_positioning(
+            servos=[servo], layout=layout, piece=piece,
+            sorting_profile=_AllCategoriesProfile(MISC_CATEGORY),
+        )
+
+        self.assertIsNone(positioning.step())
+        self.assertEqual((0, 0, 0), piece.destination_bin)
+        positioning.chute.moveToBin.assert_called_once()
+
+    def test_oversize_holds_when_discard_bin_is_too_small(self) -> None:
+        servo = _mk_healthy_servo()
+        section = BinSection(bins=[Bin(size=BinSize.MEDIUM, category_ids=[MISC_CATEGORY])])
+        layer = Layer(sections=[section], max_dimension_mm=80.0)
+        piece = _mk_piece()
+        piece.too_big = True
+        piece.max_dimension_mm = 95.0
+        positioning = self._mk_positioning(
+            servos=[servo], layout=DistributionLayout(layers=[layer]), piece=piece
+        )
+
+        with patch("toml_config.discardAcceptsOversize", return_value=False):
+            self.assertEqual(DistributionState.IDLE, positioning.step())
+        self.assertEqual("positioning.discard_too_small", positioning._occupancy_state)
         positioning.chute.moveToBin.assert_not_called()
-        servo.open.assert_called_once()
+
+    def test_oversize_routes_when_discard_opening_is_confirmed_large(self) -> None:
+        servo = _mk_healthy_servo()
+        section = BinSection(bins=[Bin(size=BinSize.MEDIUM, category_ids=[MISC_CATEGORY])])
+        layer = Layer(sections=[section], max_dimension_mm=80.0)
+        piece = _mk_piece()
+        piece.too_big = True
+        piece.max_dimension_mm = 95.0
+        positioning = self._mk_positioning(
+            servos=[servo], layout=DistributionLayout(layers=[layer]), piece=piece
+        )
+
+        with patch("toml_config.discardAcceptsOversize", return_value=True):
+            self.assertIsNone(positioning.step())
+        self.assertEqual(MISC_CATEGORY, piece.category_id)
+        self.assertEqual((0, 0, 0), piece.destination_bin)
+        positioning.chute.moveToBin.assert_called_once()
+
+    def test_normal_category_too_large_for_layer_routes_to_large_discard(self) -> None:
+        servo = _mk_healthy_servo()
+        section = BinSection(bins=[
+            Bin(size=BinSize.MEDIUM, category_ids=["cat_a"]),
+            Bin(size=BinSize.MEDIUM, category_ids=[MISC_CATEGORY]),
+        ])
+        layer = Layer(sections=[section], max_dimension_mm=80.0)
+        piece = _mk_piece()
+        piece.max_dimension_mm = 95.0
+        positioning = self._mk_positioning(
+            servos=[servo], layout=DistributionLayout(layers=[layer]), piece=piece
+        )
+
+        with patch("toml_config.discardAcceptsOversize", return_value=True):
+            self.assertIsNone(positioning.step())
+        self.assertEqual(MISC_CATEGORY, piece.category_id)
+        self.assertEqual((0, 0, 1), piece.destination_bin)
 
     def test_repeat_detection_does_not_spam_error_or_queue(self) -> None:
         # Re-entering Positioning while the bus is still offline must not

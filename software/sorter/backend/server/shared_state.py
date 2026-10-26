@@ -36,8 +36,6 @@ vision_manager: Optional[Any] = None
 last_broadcast_ok_ts: float = 0.0
 camera_service: Optional[Any] = None
 pulse_locks: Dict[str, threading.Lock] = {}
-distribution_no_bin_passthrough_approvals: set[str] = set()
-distribution_no_bin_passthrough_lock = threading.RLock()
 # Both set by the broadcaster thread (main.py): the full snapshot behind
 # GET /runtime-stats, and the live part last pushed to the dashboard.
 runtime_stats_snapshot: Optional[dict[str, Any]] = None
@@ -119,25 +117,6 @@ def setCameraService(svc: Any) -> None:
 def setVisionManager(mgr: Any) -> None:
     global vision_manager
     vision_manager = mgr
-
-
-def approveDistributionNoBinPassthrough(piece_uuid: str | None) -> bool:
-    if not isinstance(piece_uuid, str) or not piece_uuid.strip():
-        return False
-    with distribution_no_bin_passthrough_lock:
-        distribution_no_bin_passthrough_approvals.add(piece_uuid.strip())
-    return True
-
-
-def consumeDistributionNoBinPassthrough(piece_uuid: str | None) -> bool:
-    if not isinstance(piece_uuid, str) or not piece_uuid.strip():
-        return False
-    key = piece_uuid.strip()
-    with distribution_no_bin_passthrough_lock:
-        if key not in distribution_no_bin_passthrough_approvals:
-            return False
-        distribution_no_bin_passthrough_approvals.discard(key)
-    return True
 
 
 # ---------------------------------------------------------------------------

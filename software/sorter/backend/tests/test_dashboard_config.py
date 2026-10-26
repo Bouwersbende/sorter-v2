@@ -34,7 +34,7 @@ class DashboardConfigTests(unittest.TestCase):
         self.assertFalse(config["show_sample_capture"])
         self.assertEqual("automatic", config["incident_handling"]["exit_stuck"])
         self.assertEqual("off", config["incident_handling"]["distribution_servo_bus_offline"])
-        self.assertEqual("off", config["incident_handling"]["distribution_no_bin_available"])
+        self.assertNotIn("distribution_no_bin_available", config["incident_handling"])
         definition_kinds = [item["kind"] for item in config["incident_definitions"]]
         self.assertEqual(
             [
@@ -42,7 +42,6 @@ class DashboardConfigTests(unittest.TestCase):
                 "piece_circling",
                 "piece_held",
                 "distribution_servo_bus_offline",
-                "distribution_no_bin_available",
             ],
             definition_kinds,
         )
@@ -50,7 +49,7 @@ class DashboardConfigTests(unittest.TestCase):
         self.assertEqual("automatic", defaults["exit_stuck"])
         self.assertEqual("automatic", defaults["piece_circling"])
         self.assertEqual("automatic", defaults["piece_held"])
-        self.assertEqual("off", defaults["distribution_no_bin_available"])
+        self.assertNotIn("distribution_no_bin_available", defaults)
 
     def test_dashboard_config_only_lists_default_codepath_kinds(self) -> None:
         config = getDashboardConfig()
@@ -92,12 +91,12 @@ class DashboardConfigTests(unittest.TestCase):
 
         self.assertEqual("manual", config["incident_handling"]["exit_stuck"])
         self.assertEqual("manual", config["incident_handling"]["distribution_servo_bus_offline"])
-        self.assertEqual("off", config["incident_handling"]["distribution_no_bin_available"])
+        self.assertNotIn("distribution_no_bin_available", config["incident_handling"])
         self.assertNotIn("bulk_feeder_stalled", config["incident_handling"])
         self.assertNotIn("c2_separation_needed", config["incident_handling"])
         self.assertNotIn("unknown_incident", config["incident_handling"])
         self.assertNotIn("classification_exit_release", config["incident_handling"])
-        self.assertTrue(incidentHandlingOff("distribution_no_bin_available"))
+        self.assertFalse(incidentHandlingOff("distribution_no_bin_available"))
         self.assertFalse(incidentHandlingAutomatic("exit_stuck"))
 
         config = setDashboardConfig({"incident_handling": {"classification_exit_stuck": "off"}})

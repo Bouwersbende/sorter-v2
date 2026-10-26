@@ -1,17 +1,4 @@
-"""A multi-drop clump belongs in the bottom bucket, whole.
-
-Only the clump member that becomes the head is ever handed to distribution, and
-distribution opens every door for it. The siblings touch it, so the detector
-merges and re-ids them: on a production machine 60 of 101 clump members were
-never routed at all, and 22 of them left the platter while a layer door was
-closed for some later piece — i.e. into a customer's sorted bin. The forced
-channel sweep had the same hole, by design: it dumped the platter "wherever the
-chute happens to point", and 11 of 66 sweeps ran with a door closed.
-
-These tests pin the two rules that follow: a sweep opens every door before it
-turns, and losing an unrouted clump member keeps the doors open until it has had
-its chance to fall.
-"""
+"""Recovery pieces must be aimed at the assigned physical discard bin."""
 
 from __future__ import annotations
 
@@ -22,6 +9,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from defs.known_object import ClassificationStatus, KnownObject, PieceStage
+from irl.bin_layout import Bin, BinSection, BinSize, DistributionLayout, Layer
+from sorting_profile import MISC_CATEGORY
 from piece_transport import ClassificationChannelTransport
 from runtime_stats import RuntimeStatsCollector
 from subsystems.classification_channel.two_piece import flow as two_piece
@@ -36,6 +25,7 @@ from subsystems.classification_channel.two_piece.flow import (
     _TrackedPiece,
     TwoPieceClassificationChannel,
 )
+from subsystems.classification_channel.two_piece.spoke_home import clearPiecesFromChannel
 from subsystems.distribution.chute import BinAddress
 from subsystems.distribution.positioning import Positioning
 from subsystems.distribution.states import DistributionState
@@ -119,25 +109,39 @@ def _mkSweepWorld(*, disable_servos: bool = False, servo_count: int = 3):
         disable_servos=disable_servos,
         perception_service=_Perception(stepper),
     )
-    irl = SimpleNamespace(carousel_stepper=stepper, servos=servos)
+    layout = DistributionLayout(layers=[
+        Layer(sections=[BinSection(bins=[Bin(size=BinSize.MEDIUM, category_ids=[MISC_CATEGORY] if i == 1 else [])])])
+        for i in range(servo_count)
+    ])
+    chute = SimpleNamespace(
+        homed=True,
+        stepper=SimpleNamespace(stopped=True),
+        isBinReachable=lambda address: True,
+        getAngleForBin=lambda address: 30.0,
+        moveToAngleBlocking=lambda angle, timeout_buffer_ms=0: log.append("chute_aim") or 100,
+    )
+    irl = SimpleNamespace(carousel_stepper=stepper, servos=servos, chute=chute, distribution_layout=layout)
     return gc, irl, servos, log
 
 
 # ------------------------------------------------------------------ the sweep
 
 
-def test_sweep_opens_every_door_before_it_turns_the_platter() -> None:
+def test_sweep_aims_discard_before_it_turns_the_platter() -> None:
     gc, irl, servos, log = _mkSweepWorld()
 
     result = clearChannelByAdvancing(gc, irl, SimpleNamespace(), label="[TEST]")
 
     assert result.cleared
-    assert [servo.open_calls for servo in servos] == [1, 1, 1]
+    assert result.destination_bin == (1, 0, 0)
+    assert [servo.open_calls for servo in servos] == [1, 0, 0]
+    assert servos[1].close_calls == 1
+    assert log.index("chute_aim") < log.index("move1"), log
     assert log.index("open0") < log.index("move1"), log
-    assert log.index("open2") < log.index("move1"), log
+    assert "open2" not in log
 
 
-def test_sweep_reopens_a_door_the_shadow_state_already_calls_open() -> None:
+def test_sweep_recommands_doors_despite_shadow_state() -> None:
     # The servo shadow is written even when the firmware rejects the move, so a
     # door believed open can physically be closed. The sweep must not trust it.
     gc, irl, servos, _log = _mkSweepWorld()
@@ -146,15 +150,107 @@ def test_sweep_reopens_a_door_the_shadow_state_already_calls_open() -> None:
 
     clearChannelByAdvancing(gc, irl, SimpleNamespace(), label="[TEST]")
 
-    assert [servo.open_calls for servo in servos] == [1, 1, 1]
+    assert [servo.open_calls for servo in servos] == [1, 0, 0]
+    assert servos[1].close_calls == 1
 
 
-def test_sweep_leaves_the_doors_alone_when_servos_are_disabled() -> None:
+def test_sweep_ignores_uncalibrated_layer_below_discard() -> None:
+    gc, irl, servos, _log = _mkSweepWorld()
+    irl.distribution_layout.layers[0].sections[0].bins[0].category_ids = [MISC_CATEGORY]
+    irl.distribution_layout.layers[1].sections[0].bins[0].category_ids = []
+    servos[1].is_calibrated = False
+
+    result = clearChannelByAdvancing(gc, irl, SimpleNamespace(), label="[TEST]")
+
+    assert result.cleared
+    assert result.destination_bin == (0, 0, 0)
+    assert servos[0].close_calls == 1
+    assert servos[1].open_calls == servos[1].close_calls == 0
+
+
+def test_sweep_aims_discard_without_servo_on_fixed_closed_layer() -> None:
+    gc, irl, servos, log = _mkSweepWorld(disable_servos=True)
+    gc.fixed_closed_single_layer = True
+    irl.distribution_layout.layers[0].sections[0].bins[0].category_ids = [MISC_CATEGORY]
+    irl.distribution_layout.layers[1].sections[0].bins[0].category_ids = []
+    for layer in irl.distribution_layout.layers[1:]:
+        layer.enabled = False
+    irl.servos = []
+
+    result = clearChannelByAdvancing(gc, irl, SimpleNamespace(), label="[TEST]")
+
+    assert result.cleared
+    assert result.destination_bin == (0, 0, 0)
+    assert "chute_aim" in log
+    assert "move1" in log
+    assert sum(servo.open_calls + servo.close_calls for servo in servos) == 0
+
+
+def test_fixed_closed_flap_refuses_a_second_enabled_layer() -> None:
+    gc, irl, _servos, log = _mkSweepWorld(disable_servos=True)
+    gc.fixed_closed_single_layer = True
+    irl.servos = []
+
+    result = clearChannelByAdvancing(gc, irl, SimpleNamespace(), label="[TEST]")
+
+    assert result.reason == "discard_unavailable:fixed_flap_layout_invalid"
+    assert result.output_deg_moved == 0
+    assert "chute_aim" not in log
+
+
+def test_sweep_reports_uncalibrated_discard_door_without_advancing() -> None:
+    gc, irl, servos, log = _mkSweepWorld()
+    servos[1].is_calibrated = False
+
+    result = clearChannelByAdvancing(gc, irl, SimpleNamespace(), label="[TEST]")
+
+    assert result.reason == "discard_unavailable:layer_2_servo_uncalibrated"
+    assert result.output_deg_moved == 0
+    assert "move1" not in log
+    assert servos[1].close_calls == 0
+
+
+def test_spoke_home_fault_names_uncalibrated_layer() -> None:
+    gc, irl, servos, _log = _mkSweepWorld()
+    servos[1].is_calibrated = False
+
+    try:
+        clearPiecesFromChannel(gc, irl, SimpleNamespace())
+    except RuntimeError as exc:
+        assert "layer 2 door servo is not calibrated" in str(exc)
+        assert "Settings > Storage layers" in str(exc)
+    else:
+        raise AssertionError("Expected an actionable uncalibrated-servo fault")
+
+
+def test_sweep_holds_channel_when_servos_are_disabled() -> None:
     gc, irl, servos, log = _mkSweepWorld(disable_servos=True)
 
-    assert clearChannelByAdvancing(gc, irl, SimpleNamespace(), label="[TEST]").cleared
+    assert clearChannelByAdvancing(gc, irl, SimpleNamespace(), label="[TEST]").reason == "discard_unavailable:motion_disabled"
     assert [servo.open_calls for servo in servos] == [0, 0, 0]
-    assert log == ["move1"]
+    assert log == []
+
+
+def test_sweep_holds_channel_when_discard_is_unassigned() -> None:
+    gc, irl, servos, log = _mkSweepWorld()
+    irl.distribution_layout.layers[1].sections[0].bins[0].category_ids = []
+
+    result = clearChannelByAdvancing(gc, irl, SimpleNamespace(), label="[TEST]")
+
+    assert result.reason == "discard_unavailable:no_usable_discard_bin"
+    assert [servo.close_calls for servo in servos] == [0, 0, 0]
+    assert log == []
+
+
+def test_sweep_holds_channel_when_chute_refuses_discard_aim() -> None:
+    gc, irl, servos, log = _mkSweepWorld()
+    irl.chute.moveToAngleBlocking = lambda angle, timeout_buffer_ms=0: None
+
+    result = clearChannelByAdvancing(gc, irl, SimpleNamespace(), label="[TEST]")
+
+    assert result.reason == "discard_unavailable:chute_aim_failed"
+    assert result.output_deg_moved == 0
+    assert "move1" not in log
 
 
 def test_sweep_of_an_empty_channel_touches_nothing() -> None:
@@ -386,6 +482,22 @@ def _mkPositioning(shared, servos, log):
     return positioning
 
 
+def test_positioning_uses_only_fixed_closed_layer_without_servos() -> None:
+    positioning = Positioning.__new__(Positioning)
+    positioning.gc = SimpleNamespace(disable_servos=True, fixed_closed_single_layer=True)
+    positioning.logger = _Logger()
+    positioning._blocked_layers = set()
+    positioning._servo_offline_layers = set()
+    positioning.layout = DistributionLayout(layers=[Layer(), Layer(enabled=False)])
+
+    assert positioning._isLayerUsable(0)
+    assert positioning._selectDoor(0)
+    assert not positioning._isLayerUsable(1)
+    positioning.layout.layers[1].enabled = True
+    assert not positioning._isLayerUsable(0)
+    assert not positioning._selectDoor(0)
+
+
 def _mkClassifiedPiece(shared) -> KnownObject:
     piece = KnownObject(part_id="3001", color_id="1")
     piece.classification_status = ClassificationStatus.classified
@@ -404,23 +516,23 @@ def test_positioning_claims_a_bin_when_nothing_is_loose() -> None:
     assert servos[1].close_calls == 1
 
 
-def test_positioning_sends_everything_to_the_bucket_while_a_piece_is_loose() -> None:
+def test_positioning_sends_everything_to_discard_while_a_piece_is_loose() -> None:
     shared = _mkShared()
     shared.bucket_passthrough_hold = True
     log: list[str] = []
     servos = [_Servo(log, i) for i in range(3)]
     piece = _mkClassifiedPiece(shared)
 
-    assert _mkPositioning(shared, servos, log).step() == DistributionState.READY
-    assert piece.destination_bin is None
-    assert piece.category_id == "cat_a"
+    assert _mkPositioning(shared, servos, log).step() is None
+    assert piece.destination_bin == (1, 0, 0)
+    assert piece.category_id == MISC_CATEGORY
     assert piece.stage == PieceStage.distributing
-    assert [servo.close_calls for servo in servos] == [0, 0, 0]
-    assert [servo.open_calls for servo in servos] == [1, 1, 1]
-    assert "chute_move" not in log
+    assert [servo.close_calls for servo in servos] == [0, 1, 0]
+    assert [servo.open_calls for servo in servos] == [1, 0, 1]
+    assert "chute_move" in log
 
 
-def test_passthrough_reopens_a_door_the_shadow_state_calls_open() -> None:
+def test_discard_routing_reopens_parked_doors_despite_shadow_state() -> None:
     shared = _mkShared()
     shared.bucket_passthrough_hold = True
     log: list[str] = []
@@ -429,4 +541,5 @@ def test_passthrough_reopens_a_door_the_shadow_state_calls_open() -> None:
 
     _mkPositioning(shared, servos, log).step()
 
-    assert [servo.open_calls for servo in servos] == [1, 1, 1]
+    assert [servo.open_calls for servo in servos] == [1, 0, 1]
+    assert servos[1].close_calls == 1

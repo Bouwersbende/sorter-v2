@@ -59,6 +59,7 @@
 	let errorMsg = $state<string | null>(null);
 	let statusMsg = $state('');
 	let backend = $state<ServoBackend>('pca9685');
+	let fixedClosedSingleLayer = $state(false);
 	let layers = $state<LayerDraft[]>([]);
 	let channelChoices = $state<number[]>([]);
 	let allowedCounts = $state<number[]>([6, 12, 18, 30]);
@@ -110,6 +111,7 @@
 	// The live servos are built when the machine homes, so a layer added or
 	// rewired since then can't move until it is saved and the machine homed.
 	function layerCanMove(layer: LayerDraft): boolean {
+		if (fixedClosedSingleLayer) return false;
 		return layer.liveChannel !== null && layer.channel === String(layer.liveChannel);
 	}
 
@@ -140,6 +142,7 @@
 			const payload = await res.json();
 			const servo = payload?.servo ?? {};
 			backend = servo.backend === 'waveshare' ? 'waveshare' : 'pca9685';
+			fixedClosedSingleLayer = servo.fixed_closed_single_layer === true;
 			globalOpenAngle = typeof servo.open_angle === 'number' ? servo.open_angle : null;
 			globalClosedAngle = typeof servo.closed_angle === 'number' ? servo.closed_angle : null;
 			openSpeed = typeof servo.open_speed === 'number' ? servo.open_speed : null;
@@ -340,7 +343,7 @@
 				if (id !== null && (!Number.isInteger(id) || id < 0)) {
 					throw new Error(`Layer ${index + 1} has an invalid channel.`);
 				}
-				if (id === null && layer.enabled) {
+				if (id === null && layer.enabled && !(fixedClosedSingleLayer && index === 0)) {
 					throw new Error(`Layer ${index + 1} needs a channel while it is active.`);
 				}
 				return { id, invert: layer.invert };
@@ -533,6 +536,12 @@
 	</Alert>
 {:else}
 	<Panel title="Each layer's flap">
+		{#if fixedClosedSingleLayer}
+			<p class="text-sm text-ink">
+				Layer 1 has a permanently closed flap and no servo. The chute still aims at its bins.
+				Only layer 1 can be active in this mode.
+			</p>
+		{:else}
 		<div class="flex flex-col gap-4 md:flex-row md:items-start md:gap-8">
 			<div class="flex items-center gap-4">
 				<ChuteFlapDiagram state="open" size={128} />
@@ -553,6 +562,7 @@
 			For each layer, move its flap with the arrows (or the arrow keys) until it looks like the
 			picture, then lock that angle: open first, then closed. A layer sorts once both are locked.
 		</p>
+		{/if}
 	</Panel>
 
 	<Panel title="Layers" flush>
@@ -563,7 +573,7 @@
 				onchange={(on) => userConfig.setServoAdvanced(on)}
 			/>
 			<span id="storage-layers-advanced" class="text-sm text-ink">Advanced</span>
-			<Button size="sm" icon={Plus} disabled={loading || saving} onclick={addLayer}
+			<Button size="sm" icon={Plus} disabled={loading || saving || fixedClosedSingleLayer} onclick={addLayer}
 				>Add a layer</Button
 			>
 		{/snippet}
@@ -595,6 +605,8 @@
 						<span class="text-sm font-semibold text-ink">{layer.label}</span>
 						{#if !layer.enabled}
 							<Badge>Off</Badge>
+						{:else if fixedClosedSingleLayer && layer.layerIndex === 0}
+							<Badge>Fixed closed · no servo</Badge>
 						{:else if calibrated}
 							<Badge tone="success"><Lock size={12} /> Calibrated</Badge>
 						{:else}
@@ -608,7 +620,7 @@
 						<span class="ml-auto flex items-center gap-3">
 							<Checkbox
 								checked={layer.enabled}
-								disabled={loading || saving}
+								disabled={loading || saving || fixedClosedSingleLayer}
 								onchange={(e) =>
 									setLayer(layer.layerIndex, {
 										enabled: (e.currentTarget as HTMLInputElement).checked
@@ -621,7 +633,7 @@
 								size="sm"
 								icon={Trash2}
 								label="Remove {layer.label}"
-								disabled={loading || saving}
+								disabled={loading || saving || fixedClosedSingleLayer}
 								onclick={() => removeLayer(layer.layerIndex)}
 							/>
 						</span>
@@ -678,7 +690,7 @@
 										id="layer-{layer.layerIndex}-channel"
 										size="sm"
 										value={layer.channel}
-										disabled={loading || saving}
+										disabled={loading || saving || fixedClosedSingleLayer}
 										onchange={(channel) => setLayer(layer.layerIndex, { channel })}
 										options={[
 											{ value: '', label: 'None' },
@@ -702,6 +714,7 @@
 						{/if}
 					</div>
 
+					{#if !fixedClosedSingleLayer}
 					<div class="flex flex-col gap-3 rounded-item bg-well p-3">
 						<div class="flex flex-wrap items-center gap-x-8 gap-y-4">
 							<div class="flex flex-col gap-1.5">
@@ -783,6 +796,7 @@
 							</div>
 						{/if}
 					</div>
+					{/if}
 				</div>
 			{/each}
 		</div>

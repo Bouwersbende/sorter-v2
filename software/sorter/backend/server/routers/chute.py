@@ -109,9 +109,7 @@ def _chute_payload(settings: ChuteSettings) -> Dict[str, Any]:
         "first_section_offset_deg": round(settings.first_section_offset_deg, 4),
         "section_pitch_deg": round(settings.section_pitch_deg, 4),
         "pillar_width_deg": round(settings.pillar_width_deg, 4),
-        # The legacy page's name for the first section's offset; saving it back
-        # unchanged keeps the geometry as it is.
-        "first_bin_center": round(settings.first_section_offset_deg, 4),
+        "first_bin_center": round(settings.first_bin_center, 4),
         "endstop_active_high": settings.endstop_active_high,
         "operating_speed_microsteps_per_second": settings.operating_speed_microsteps_per_second,
         "home_pin_channel": settings.home_pin_channel,

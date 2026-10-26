@@ -33,7 +33,9 @@ def _make_session(model_path: Path) -> Any:
         available = set(ort.get_available_providers())
     except Exception:
         available = set()
-    if "CoreMLExecutionProvider" in available:
+    if "CUDAExecutionProvider" in available:
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    elif "CoreMLExecutionProvider" in available:
         providers = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
     return ort.InferenceSession(str(model_path), sess_options=options, providers=providers)
 

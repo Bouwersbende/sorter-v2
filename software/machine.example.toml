@@ -3,6 +3,11 @@
 # MACHINE_SPECIFIC_PARAMS_PATH, if set, points it at a different file instead.
 # This file is for parameters that vary between machines and local setups.
 
+# Enable only after confirming that the assigned physical discard bin has a
+# larger opening than its layer's normal maximum piece dimension.
+# [discard]
+# accept_oversize = true
+
 [servo]
 # For PCA9685 (default):
 # backend = "pca9685"

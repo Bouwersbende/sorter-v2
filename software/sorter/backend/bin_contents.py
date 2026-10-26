@@ -33,6 +33,9 @@ _META_KEY_OPEN_BIN_SNAPSHOT_ID = "open_bin_snapshot_id"
 # always matches the last commit.
 _bin_state_write_lock = threading.RLock()
 _bin_piece_counts: tuple[Path, dict[tuple[int, int, int], int]] | None = None
+# Quota routing runs on the control thread. Keep item totals in memory too;
+# opening SQLite for every classified piece could stall the machine loop.
+_bin_item_counts: tuple[Path, str, dict[tuple[str, str, str], int]] | None = None
 
 # The columns of a piece listing: the piece's event and its session's profile.
 _PIECE_COLUMNS = (
@@ -342,6 +345,7 @@ def start_new_sorting_session(*, reason: str = "profile_activated") -> dict[str,
         session = _ensure_active_sorting_session_conn(conn, force_new=True, reason=reason)
         conn.commit()
         _refresh_bin_piece_counts(conn)
+        _refresh_bin_item_counts(conn)
         return session
 
 
@@ -479,6 +483,58 @@ def record_piece_distribution(piece: dict[str, Any]) -> None:
         )
         conn.commit()
         _refresh_bin_piece_counts(conn)
+        _increment_bin_item_count(session_id, piece)
+
+
+def current_part_counts_by_category(
+    part_id: str, color_id: str | None, category_ids: list[str]
+) -> dict[str, int]:
+    """Recorded contents of the current bins for one part and its quota tiers.
+
+    Counts follow bin clears and session carry-forward. They are software
+    estimates of bin contents, not confirmation that a piece landed there.
+    """
+    if not category_ids:
+        return {}
+    cached = _bin_item_counts
+    if cached is None or cached[0] != db.local_state_db_path():
+        with _bin_state_write_lock, _connection() as conn:
+            _refresh_bin_item_counts(conn)
+        cached = _bin_item_counts
+    if cached is None:
+        return {}
+    totals: dict[str, int] = {}
+    for (part, color, category), count in cached[2].items():
+        if part == str(part_id) and (color_id is None or color == str(color_id)) and category in category_ids:
+            totals[category] = totals.get(category, 0) + count
+    return totals
+
+
+def _refresh_bin_item_counts(conn: sqlite3.Connection) -> None:
+    global _bin_item_counts
+    session_id = _get_meta(conn, _META_KEY_ACTIVE_SORTING_SESSION_ID)
+    counts: dict[tuple[str, str, str], int] = {}
+    if session_id:
+        for row in conn.execute(
+            "SELECT part_id, color_id, category_id, SUM(count) AS piece_count "
+            "FROM bin_item_aggregates WHERE session_id = ? "
+            "GROUP BY part_id, color_id, category_id",
+            (session_id,),
+        ):
+            key = (str(row["part_id"] or ""), str(row["color_id"] or ""), str(row["category_id"] or ""))
+            counts[key] = int(row["piece_count"])
+    _bin_item_counts = (db.local_state_db_path(), session_id or "", counts)
+
+
+def _increment_bin_item_count(session_id: str, piece: dict[str, Any]) -> None:
+    global _bin_item_counts
+    cached = _bin_item_counts
+    if cached is None or cached[0] != db.local_state_db_path() or cached[1] != session_id:
+        return
+    key = (str(piece.get("part_id") or ""), str(piece.get("color_id") or ""), str(piece.get("category_id") or ""))
+    counts = cached[2].copy()
+    counts[key] = counts.get(key, 0) + 1
+    _bin_item_counts = (cached[0], session_id, counts)
 
 
 def get_distributed_part_keys_since(since_ts: float) -> list[tuple[str | None, str | None]]:
@@ -678,6 +734,7 @@ def clear_current_session_bins(
         )
         conn.commit()
         _refresh_bin_piece_counts(conn)
+        _refresh_bin_item_counts(conn)
         return {"ok": True, "cleared_bins": cleared_bins, "snapshot_id": closed_snapshot_id}
 
 

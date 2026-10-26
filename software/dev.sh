@@ -11,6 +11,7 @@
 #   ./dev.sh api        # API-only backend (no controller / hardware)
 #   ./dev.sh frontend   # frontend only
 #   ./dev.sh --dump     # also write all output to logs/<datetime>.log
+#   SORTER_API_HOST=0.0.0.0 SORTER_UI_HOST=0.0.0.0 ./dev.sh  # LAN access
 
 set -euo pipefail
 
@@ -140,7 +141,7 @@ run_frontend() {
         log "${BLUE}Starting frontend...${RESET}"
         (
             cd "$ROOT/sorter/frontend"
-            exec pnpm dev 2>&1 \
+            exec pnpm exec vite dev --host "${SORTER_UI_HOST:-127.0.0.1}" 2>&1 \
                 | sed -u "s/^/${BLUE}[frontend]${RESET} /"
         ) &
         FRONTEND_PID=$!

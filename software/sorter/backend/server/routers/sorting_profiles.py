@@ -17,7 +17,7 @@ from bin_contents import start_new_sorting_session
 from local_state import get_hive_config, get_sorting_profile_sync_state, set_sorting_profile_sync_state
 from server import shared_state
 from server.hive_models import HiveClient, HiveError
-from sorting_profile import profileSummary
+from sorting_profile import MISC_CATEGORY, profileSummary, validateQuotaProfile
 from server.routers.bins import (
     clear_bin_category_assignments,
     _current_bin_categories,
@@ -129,19 +129,24 @@ def _preassign_bins_from_rules(artifact: dict[str, Any]) -> int:
         return 0
 
     categories = _current_bin_categories()
+    bins = [bin_categories for layer in categories for section in layer for bin_categories in section]
     assigned = 0
-    for layer in categories:
-        for section in layer:
-            for bin_categories in section:
-                if assigned >= len(rule_ids):
-                    continue
-                bin_categories.clear()
-                bin_categories.append(rule_ids[assigned])
-                assigned += 1
-    # No MISC auto-reservation here — unmatched pieces fall through to the
-    # bottom tray via distribution's passthrough branch, which the UI now
-    # renders as a virtual bin. Reserving a real bin for MISC wastes a
-    # physical slot.
+    for bin_categories in bins:
+        if assigned >= len(rule_ids):
+            continue
+        bin_categories.clear()
+        bin_categories.append(rule_ids[assigned])
+        assigned += 1
+    # A profile may explicitly share its default category's physical bin with
+    # MISC. This uses no extra slot, and leaves the bottom bucket as the
+    # fallback for oversized pieces and any piece that cannot use a bin.
+    if artifact.get("misc_shares_default_bin") is True:
+        default_category = artifact.get("default_category_id")
+        if isinstance(default_category, str) and default_category != MISC_CATEGORY:
+            for bin_categories in bins:
+                if default_category in bin_categories:
+                    bin_categories.append(MISC_CATEGORY)
+                    break
     if assigned > 0:
         _apply_and_persist_bin_categories(categories)
     return assigned
@@ -509,6 +514,8 @@ def apply_sorting_profile(payload: ApplySortingProfilePayload) -> dict[str, Any]
     except Exception as exc:
         raise _hive_http_error(exc) from exc
 
+    _validate_quotas_or_400(artifact)
+
     artifact_hash = str(artifact.get("artifact_hash") or "")
     _atomic_write_json(shared_state.gc_ref.sorting_profile_path, artifact)
     reloaded = _reload_runtime_profile()
@@ -637,6 +644,13 @@ def _is_profile_artifact(artifact: Any) -> bool:
     )
 
 
+def _validate_quotas_or_400(artifact: dict[str, Any]) -> None:
+    try:
+        validateQuotaProfile(artifact)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _load_local_artifact(path: Path) -> dict[str, Any]:
     try:
         with open(path, "r") as handle:
@@ -648,6 +662,7 @@ def _load_local_artifact(path: Path) -> dict[str, Any]:
             status_code=400,
             detail="Profile is not a valid sorting profile (it has neither a program nor a part map).",
         )
+    _validate_quotas_or_400(artifact)
     return artifact
 
 
@@ -723,6 +738,7 @@ def upload_local_sorting_profile(payload: UploadLocalSortingProfilePayload) -> d
             status_code=400,
             detail="Uploaded JSON is not a valid sorting profile (it has neither a program nor a part map).",
         )
+    _validate_quotas_or_400(artifact)
     name = (payload.name or "").strip()
     if name:
         artifact = {**artifact, "name": name}

@@ -238,6 +238,7 @@ def _servo_settings_from_config(config: Dict[str, Any]) -> Dict[str, Any]:
     servo = config.get("servo", {})
     if not isinstance(servo, dict):
         servo = {}
+    fixed_closed_single_layer = servo.get("fixed_closed_single_layer") is True
 
     backend = servo.get("backend", "pca9685")
     if backend not in {"pca9685", "waveshare"}:
@@ -271,7 +272,7 @@ def _servo_settings_from_config(config: Dict[str, Any]) -> Dict[str, Any]:
     channels: List[Dict[str, Any]] = []
     for index in range(layer_count):
         existing = parsed_channels[index] if index < len(parsed_channels) else None
-        default_id = index + 1 if backend == "waveshare" else index
+        default_id = None if fixed_closed_single_layer else (index + 1 if backend == "waveshare" else index)
         channels.append(
             {
                 "id": (int(existing["id"]) if existing is not None and existing["id"] is not None else None)
@@ -283,6 +284,7 @@ def _servo_settings_from_config(config: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "backend": backend,
+        "fixed_closed_single_layer": fixed_closed_single_layer,
         **asdict(readServoSpeeds(config)),
         "port": port.strip() if isinstance(port, str) and port.strip() else None,
         "channels": channels,
@@ -312,6 +314,7 @@ def save_servo_hardware_config(
     # old layer count until a restart — trusting it here rejected valid saves.
     current_layers = getBinLayout().layers
     layer_count = len(current_layers)
+    fixed_closed_single_layer = _servo_settings_from_config(machine_toml.read())["fixed_closed_single_layer"]
 
     if len(payload.channels) != layer_count:
         raise HTTPException(
@@ -326,7 +329,7 @@ def save_servo_hardware_config(
         layer_enabled = bool(getattr(current_layers[index], "enabled", True))
 
         if channel_id is None:
-            if layer_enabled:
+            if layer_enabled and not (fixed_closed_single_layer and index == 0):
                 raise HTTPException(
                     status_code=400,
                     detail=f"Layer {index + 1} needs a servo assignment while the layer is active.",

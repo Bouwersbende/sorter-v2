@@ -22,6 +22,13 @@ class ChannelClearResult:
     occupied_at_start: bool
     output_deg_moved: float
     reason: str
+    destination_bin: tuple[int, int, int] | None = None
+
+
+@dataclass(frozen=True)
+class DiscardAimResult:
+    destination_bin: tuple[int, int, int] | None
+    reason: str
 
 
 def _carouselStepper(irl: Any) -> Any:
@@ -57,51 +64,127 @@ def channelOccupied(gc: Any) -> Optional[bool]:
     return None
 
 
-def openAllLayerDoors(gc: Any, irl: Any, label: str = LOG_TAG, settle_timeout_s: float = 2.0) -> None:
-    """Open every layer door so a forced sweep drops the channel's contents into
-    the bottom bucket instead of whichever bin the chute happens to point at.
+def aimPhysicalDiscard(gc: Any, irl: Any, label: str = LOG_TAG, settle_timeout_s: float = 2.0) -> DiscardAimResult:
+    """Aim and set doors for the assigned physical discard bin before sweeping.
 
-    Nothing that comes off the channel this way has been routed: it is the piece
-    distribution was aiming for plus anything else still riding the platter (a
-    multi-drop clump, a stray, a piece whose track was lost). A closed layer door
-    would catch that mixture in a customer's sorted bin, so every door opens
-    first and the whole sweep goes to the bucket.
-
-    The doors are re-commanded unconditionally — shadow state is never trusted
-    here, exactly as ``Positioning._selectDoor`` does before a dispense. A door
-    still moving refuses a new command, so each is commanded once it has
-    stopped, and we wait for the flaps to stop before the caller starts rotating.
+    Failure leaves the channel stationary. Never sweep into the bucket or a
+    previously selected customer's bin when the discard route is unavailable.
     """
-    if getattr(gc, "disable_servos", False):
-        return
-    servos = list(getattr(irl, "servos", []) or [])
-    if not servos:
-        return
+    from sorting_profile import MISC_CATEGORY
+    from subsystems.distribution.chute import BinAddress
+    from bin_contents import get_current_bin_piece_counts
+
+    chute = getattr(irl, "chute", None)
+    layout = getattr(irl, "distribution_layout", None)
+    if chute is None or layout is None or not getattr(chute, "homed", False):
+        gc.logger.warning(f"{label} channel clear: physical discard chute is not homed")
+        return DiscardAimResult(None, "chute_not_homed")
+    if getattr(gc, "disable_chute", False):
+        gc.logger.warning(f"{label} channel clear: chute disabled")
+        return DiscardAimResult(None, "motion_disabled")
+    fixed_flap = bool(getattr(gc, "fixed_closed_single_layer", False))
+    if getattr(gc, "disable_servos", False) and not fixed_flap:
+        gc.logger.warning(f"{label} channel clear: servos disabled without fixed closed flap mode")
+        return DiscardAimResult(None, "motion_disabled")
+    if fixed_flap:
+        from irl.bin_layout import fixedClosedSingleLayerReady
+
+        if not fixedClosedSingleLayerReady(layout):
+            gc.logger.warning(f"{label} channel clear: fixed closed flap requires only layer 1 enabled")
+            return DiscardAimResult(None, "fixed_flap_layout_invalid")
+    try:
+        counts = get_current_bin_piece_counts()
+    except Exception as exc:
+        gc.logger.warning(f"{label} channel clear: cannot read discard capacity: {exc}")
+        return DiscardAimResult(None, "discard_capacity_unavailable")
+    selected = None
+    for layer_index, layer in enumerate(layout.layers):
+        if not getattr(layer, "enabled", True):
+            continue
+        for section_index, section in enumerate(layer.sections):
+            if not getattr(section, "enabled", True):
+                continue
+            for bin_index, bin_ in enumerate(section.bins):
+                address = BinAddress(layer_index, section_index, bin_index)
+                limit = getattr(layer, "max_pieces_per_bin", None)
+                if (
+                    MISC_CATEGORY in bin_.category_ids
+                    and (limit is None or counts.get((layer_index, section_index, bin_index), 0) < limit)
+                    and chute.isBinReachable(address)
+                ):
+                    selected = address
+                    break
+            if selected is not None:
+                break
+        if selected is not None:
+            break
+    if selected is None:
+        gc.logger.warning(f"{label} channel clear: no usable physical discard bin")
+        return DiscardAimResult(None, "no_usable_discard_bin")
+
+    if fixed_flap:
+        if selected.layer_index != 0:
+            return DiscardAimResult(None, "fixed_flap_target_invalid")
+        gc.logger.info(f"{label} channel clear: layer 1 flap is fixed closed; no servo command")
+        routed_servos = []
+    else:
+        servos = list(getattr(irl, "servos", []) or [])
+        if selected.layer_index >= len(servos):
+            gc.logger.warning(f"{label} channel clear: discard layer has no servo")
+            return DiscardAimResult(None, "discard_servo_missing")
+        # Only doors above the target can intercept a falling piece. A disabled
+        # layer below discard may have no calibration, and moving it is unnecessary.
+        routed_servos = servos[: selected.layer_index + 1]
     deadline = time.monotonic() + max(0.0, settle_timeout_s)
-    opened: list[int] = []
-    for i, servo in enumerate(servos):
+    for i, servo in enumerate(routed_servos):
         try:
+            if not getattr(servo, "is_calibrated", True):
+                gc.logger.warning(f"{label} channel clear: layer {i + 1} door servo is not calibrated")
+                return DiscardAimResult(None, f"layer_{i + 1}_servo_uncalibrated")
             while not servo.stopped and time.monotonic() < deadline:
                 time.sleep(0.02)
-            if hasattr(servo, "apply_open_speed"):
-                servo.apply_open_speed()
-            if servo.open() is False:
-                gc.logger.warning(f"{label} channel clear: layer {i} door refused to open")
-                continue
-            opened.append(i)
+            if not servo.stopped or not getattr(servo, "available", True):
+                gc.logger.warning(f"{label} channel clear: layer {i} servo unavailable")
+                return DiscardAimResult(None, f"layer_{i + 1}_servo_unavailable")
+            if i == selected.layer_index:
+                if hasattr(servo, "apply_close_speed"):
+                    servo.apply_close_speed()
+                accepted = servo.close()
+            else:
+                if hasattr(servo, "apply_open_speed"):
+                    servo.apply_open_speed()
+                accepted = servo.open()
+            if accepted is False:
+                gc.logger.warning(f"{label} channel clear: layer {i} door refused command")
+                return DiscardAimResult(None, f"layer_{i + 1}_door_refused_command")
         except Exception as exc:
-            gc.logger.warning(f"{label} channel clear: could not open layer {i} door: {exc}")
-    gc.logger.info(f"{label} channel clear: opened layer doors {opened} — sweep goes to the bucket")
+            gc.logger.warning(f"{label} channel clear: layer {i} door failed: {exc}")
+            return DiscardAimResult(None, f"layer_{i + 1}_door_failed")
     while time.monotonic() < deadline:
         try:
-            if all(bool(getattr(servo, "stopped", True)) for servo in servos):
-                return
+            if all(bool(getattr(servo, "stopped", True)) for servo in routed_servos):
+                break
         except Exception:
-            return
+            return DiscardAimResult(None, "door_state_unavailable")
         time.sleep(0.02)
-    gc.logger.warning(
-        f"{label} channel clear: layer doors still moving after {settle_timeout_s:.1f}s — sweeping anyway"
-    )
+    if not all(bool(getattr(servo, "stopped", False)) for servo in routed_servos):
+        gc.logger.warning(f"{label} channel clear: layer doors did not settle")
+        return DiscardAimResult(None, "door_settle_timeout")
+    try:
+        while not chute.stepper.stopped and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not chute.stepper.stopped:
+            gc.logger.warning(f"{label} channel clear: chute did not settle")
+            return DiscardAimResult(None, "chute_settle_timeout")
+        angle = chute.getAngleForBin(selected)
+        if angle is None or chute.moveToAngleBlocking(angle, timeout_buffer_ms=1500) is None:
+            gc.logger.warning(f"{label} channel clear: chute could not aim at physical discard")
+            return DiscardAimResult(None, "chute_aim_failed")
+    except Exception as exc:
+        gc.logger.warning(f"{label} channel clear: discard aim failed: {exc}")
+        return DiscardAimResult(None, "chute_aim_failed")
+    gc.logger.info(f"{label} channel clear: aimed at discard bin {selected}")
+    return DiscardAimResult((selected.layer_index, selected.section_index, selected.bin_index), "aimed")
 
 
 def _advanceOneStep(stepper: Any, step_microsteps: int, speed_usteps_per_s: int) -> bool:
@@ -158,7 +241,10 @@ def clearChannelByAdvancing(
         C4_TRAVEL_SIGN * abs(step_output_deg)
     )
 
-    openAllLayerDoors(gc, irl, label)
+    aim = aimPhysicalDiscard(gc, irl, label)
+    if aim.destination_bin is None:
+        return ChannelClearResult(False, bool(occupied), 0.0, f"discard_unavailable:{aim.reason}")
+    destination_bin = aim.destination_bin
 
     if occupied is None:
         gc.logger.info(
@@ -175,19 +261,19 @@ def clearChannelByAdvancing(
     while moved_output_deg < abs(max_output_deg):
         if not _advanceOneStep(stepper, step_microsteps, int(speed_usteps_per_s)):
             gc.logger.warning(f"{label} channel clear: advance move not acknowledged — aborting")
-            return ChannelClearResult(False, True, moved_output_deg, "move_failed")
+            return ChannelClearResult(False, True, moved_output_deg, "move_failed", destination_bin)
         moved_output_deg += abs(step_output_deg)
         occupied = channelOccupied(gc)
         if occupied is False:
             gc.logger.info(
                 f"{label} channel clear: channel empty after advancing {moved_output_deg:.0f}°"
             )
-            return ChannelClearResult(True, True, moved_output_deg, "cleared")
+            return ChannelClearResult(True, True, moved_output_deg, "cleared", destination_bin)
 
     cleared = channelOccupied(gc) is False
     gc.logger.info(
         f"{label} channel clear: advanced full budget {moved_output_deg:.0f}° (cleared={cleared})"
     )
     return ChannelClearResult(
-        cleared, True, moved_output_deg, "cleared" if cleared else "budget_exhausted"
+        cleared, True, moved_output_deg, "cleared" if cleared else "budget_exhausted", destination_bin
     )

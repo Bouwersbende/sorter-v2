@@ -447,12 +447,6 @@ def assign_bin_categories(
         category_id = category_id.strip()
         if not category_id or category_id in cleaned:
             continue
-        # MISC is the virtual discard passthrough, never a physical bin.
-        if category_id == MISC_CATEGORY:
-            raise HTTPException(
-                status_code=400,
-                detail="Misc is the discard passthrough and cannot be assigned to a bin.",
-            )
         cleaned.append(category_id)
 
     # A category lives in exactly one bin. Drop these category_ids from every
@@ -552,9 +546,9 @@ def get_bins_layout() -> Dict[str, Any]:
     layout_config = getBinLayout()
     config = machine_toml.read()
     chute_cfg = _chute_settings_from_config(config)
-    first_bin_center = float(chute_cfg["first_bin_center"])
-    pillar_width_deg = float(chute_cfg["pillar_width_deg"])
-    usable_per_section = 60.0 - pillar_width_deg
+    first_section_offset_deg = float(chute_cfg["first_section_offset_deg"])
+    usable_per_section = float(chute_cfg["section_width_deg"])
+    section_pitch_deg = float(chute_cfg["section_pitch_deg"])
 
     layers_out = []
     for layer_idx, layer in enumerate(layout_config.layers):
@@ -565,7 +559,7 @@ def get_bins_layout() -> Dict[str, Any]:
             num_bins = len(section_bins)
             bin_width = usable_per_section / num_bins if num_bins else 0
             for bin_idx, bin_size in enumerate(section_bins):
-                angle = first_bin_center + section_idx * 60 + bin_idx * bin_width
+                angle = first_section_offset_deg + section_idx * section_pitch_deg + (bin_idx + 0.5) * bin_width
                 bins_flat.append({
                     "section_index": section_idx,
                     "bin_index": bin_idx,

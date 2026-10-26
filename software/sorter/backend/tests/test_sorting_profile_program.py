@@ -76,6 +76,19 @@ class TestProgram:
 
 
 class TestKits:
+    def test_reset_starts_set_progress_again_and_persists(self, no_saved_progress):
+        tracker = SetProgressTracker(INVENTORIES, artifact_hash="h")
+        tracker.record("3001", "5", "kit")
+        tracker.record("3001", "5", "kit")
+        assert tracker.isFull("kit", "3001", "5")
+
+        tracker.reset()
+
+        assert tracker.get_progress()["sets"][0]["total_found"] == 0
+        assert not tracker.isFull("kit", "3001", "5")
+        assert no_saved_progress["state"]["progress"]["kit"]["5-3001"] == 0
+        assert SetProgressTracker(INVENTORIES, artifact_hash="h").get_progress()["sets"][0]["total_found"] == 0
+
     def test_a_kit_takes_its_parts_until_it_has_enough(self, tmp_path, no_saved_progress):
         profile = _profile(tmp_path, {"program": PROGRAM, "set_inventories": INVENTORIES, "profile_type": "set"})
         tracker = SetProgressTracker(INVENTORIES, artifact_hash="h")
@@ -114,6 +127,42 @@ class TestFlatMap:
     def test_the_resolver_reads_both(self):
         assert categoryResolver({"program": PROGRAM})("3003", "7") == "bricks"
         assert categoryResolver({"part_to_category": {"any_color-3003": "b"}})("3003", "7") == "b"
+
+    def test_tiered_bag_profile_uses_each_bags_current_count(self, tmp_path, monkeypatch):
+        counts = {"bag1": 0, "bag2": 0}
+        monkeypatch.setattr(
+            "bin_contents.current_part_counts_by_category",
+            lambda part, color, categories: {c: counts[c] for c in categories},
+        )
+        artifact = {
+            "part_to_category": {
+                "5-3001": [
+                    {"category_id": "bag1", "max_count": 1},
+                    {"category_id": "bag2", "max_count": 2},
+                ],
+                "any_color-3002": [{"category_id": "bag1", "max_count": 1}],
+            },
+            "default_category_id": "extra",
+        }
+        profile = _profile(tmp_path, artifact)
+        assert profile.getCategoryIdForPart("3001", "5") == "bag1"
+        counts["bag1"] = 1
+        assert profile.getCategoryIdForPart("3001", "5") == "bag2"
+        counts["bag2"] = 2
+        assert profile.getCategoryIdForPart("3001", "5") == "extra"
+        counts["bag1"] = 0  # emptying this bin opens its quota again
+        assert profile.getCategoryIdForPart("3001", "5") == "bag1"
+        assert categoryResolver(artifact)("3001", "5") == "bag1"
+
+    def test_upload_rejects_an_invalid_quota_before_saving(self):
+        from fastapi import HTTPException
+        from server.routers.sorting_profiles import UploadLocalSortingProfilePayload, upload_local_sorting_profile
+
+        with pytest.raises(HTTPException) as rejected:
+            upload_local_sorting_profile(UploadLocalSortingProfilePayload(
+                artifact={"part_to_category": {"5-3001": [{"category_id": "bag1", "max_count": 0}]}}
+            ))
+        assert rejected.value.status_code == 400
 
 
 class TestVariants:
@@ -262,3 +311,16 @@ def test_asking_the_machine_where_a_piece_goes(monkeypatch, tmp_path):
     answer = router.route_piece("3003", "7")
     assert (answer["category_id"], answer["category_name"]) == ("bricks", "Bricks")
     assert router.route_piece("3068b", None)["category_id"] == "bl_37"
+
+
+def test_perception_chooses_runtime_from_model_artifact(monkeypatch):
+    from perception import service
+
+    calls = []
+    monkeypatch.setattr(service, "OnnxYoloRuntime", lambda **kw: calls.append(("onnx", kw)) or "onnx")
+    monkeypatch.setattr(service, "RknnYoloRuntime", lambda **kw: calls.append(("rknn", kw)) or "rknn")
+    assert service._default_runtime_factory(model_path="/models/a.onnx", imgsz=320) == "onnx"
+    assert service._default_runtime_factory(model_path="/models/b.rknn", imgsz=320) == "rknn"
+    assert [kind for kind, _ in calls] == ["onnx", "rknn"]
+    with pytest.raises(ValueError, match="supports YOLO ONNX and RKNN"):
+        service._default_runtime_factory(model_path="/models/c.hef", imgsz=320)

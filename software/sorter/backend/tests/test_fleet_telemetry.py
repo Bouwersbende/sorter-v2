@@ -41,9 +41,12 @@ class _DbTestCase(unittest.TestCase):
             upload_stats._pending.clear()  # counts other tests left unflushed
         self._settings = patch.object(fleet_telemetry, "stepperSettings", lambda motor: {"sgthrs": 55, "irun": 16})
         self._settings.start()
+        self._driver_uart = patch("hardware_settings.steppers.driverUartEnabled", return_value=True)
+        self._driver_uart.start()
 
     def tearDown(self) -> None:
         self._settings.stop()
+        self._driver_uart.stop()
         if self._old_db is None:
             os.environ.pop("LOCAL_STATE_DB_PATH", None)
         else:
@@ -57,6 +60,17 @@ def _irl(**steppers: _FakeStepper) -> SimpleNamespace:
 
 
 class StepperLoadTests(_DbTestCase):
+    def test_external_step_dir_chute_is_not_sampled_as_a_tmc_driver(self) -> None:
+        chute = _FakeStepper(drv=0)
+        chute.running_at_speed = True
+        carousel = _FakeStepper(drv=0)
+        carousel.running_at_speed = True
+        probe = fleet_telemetry.StepperLoadProbe()
+        with patch("hardware_settings.steppers.driverUartEnabled", side_effect=lambda motor: motor.name != "chute"):
+            probe.sample(_irl(chute=chute, carousel=carousel), now=1.0)
+        self.assertEqual([], chute.reads)
+        self.assertTrue(carousel.reads)
+
     def test_only_steppers_that_were_commanded_are_read(self) -> None:
         chute = _FakeStepper(drv=0)
         idle = _FakeStepper(drv=0)

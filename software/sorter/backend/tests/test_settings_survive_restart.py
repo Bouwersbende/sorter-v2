@@ -19,7 +19,7 @@ from fastapi import HTTPException
 from hardware_settings.motors import MOTORS
 from hardware_settings.steppers import readStepperSettings, saveStepperSettings
 from irl.config import IRLInterface, _bindHardware, mkIRLConfig
-from irl.bin_layout import getBinLayout
+from irl.bin_layout import getBinLayout, saveBinLayout
 from machine_platform.control_board import BoardIdentity, DiscoveredStepper
 from server import shared_state
 from server.routers import chute as chute_routes
@@ -183,14 +183,21 @@ def _saved(path) -> dict:
     return tomllib.loads(path.read_text())
 
 
-def _start(board: _Board, servos: list[_Servo] | None = None, logger: _Logger | None = None) -> IRLInterface:
+def _start(
+    board: _Board,
+    servos: list[_Servo] | None = None,
+    logger: _Logger | None = None,
+    *,
+    fixed_closed_single_layer: bool = False,
+) -> IRLInterface:
     """Hardware start-up as main.py runs it, against the fake board."""
     gc = SimpleNamespace(
         logger=logger or _Logger(),
         no_power_development_mode=False,
         disable_c_channels=[],
         disable_carousel=False,
-        disable_servos=False,
+        disable_servos=fixed_closed_single_layer,
+        fixed_closed_single_layer=fixed_closed_single_layer,
         disable_chute=False,
     )
     servo_controller = SimpleNamespace(create_layer_servos=lambda _layout: list(servos or []))
@@ -412,12 +419,14 @@ def test_saving_the_chute_from_the_setup_wizard_keeps_its_saved_speed(machine) -
 
     saved = _saved(machine)["chute"]
     assert saved["operating_speed_microsteps_per_second"] == 1500
-    assert saved["first_section_offset_deg"] == 58.23
+    assert saved["first_section_offset_deg"] == 45.45  # 58.23 - half of the first bin's 25.56° slot
+    assert saved["first_bin_center"] == 58.23
     assert saved["section_width_deg"] == round(60 - 8.88, 4)
     board = _Board(SOCKETS)
     irl = _start(board)
     assert irl.chute.operating_speed_microsteps_per_second == 1500
-    assert irl.chute.first_section_offset_deg == 58.23
+    assert irl.chute.first_section_offset_deg == 45.45
+    assert irl.chute.first_bin_center == pytest.approx(58.23)
 
 
 def test_servo_speeds_survive_the_setup_wizards_servo_save_and_apply_at_start(machine) -> None:
@@ -441,6 +450,30 @@ def test_servo_speeds_survive_the_setup_wizards_servo_save_and_apply_at_start(ma
     for servo in servos:
         assert servo.speeds == (300, 400, 500)
         assert servo.limits == (10, 5000)
+
+
+def test_fixed_closed_layer_needs_no_servo_assignment(machine) -> None:
+    machine.write_text("[servo]\nfixed_closed_single_layer = true\nchannels = []\n")
+    layout = getBinLayout()
+    for layer in layout.layers[1:]:
+        layer.enabled = False
+    saveBinLayout(layout)
+
+    shown = servo_routes._servo_settings_from_config(_saved(machine))
+    assert shown["fixed_closed_single_layer"] is True
+    assert all(channel["id"] is None for channel in shown["channels"])
+
+    servo_routes.save_servo_hardware_config(
+        servo_routes.ServoHardwareSettingsPayload(
+            backend="pca9685",
+            channels=[{"id": None, "invert": False} for _ in layout.layers],
+        )
+    )
+    assert _saved(machine)["servo"]["fixed_closed_single_layer"] is True
+
+    irl = _start(_Board(SOCKETS), fixed_closed_single_layer=True)
+    assert irl.servos == []
+    assert irl.chute is not None
 
 
 def test_a_servo_speed_put_back_to_default_is_the_firmware_default_live_and_at_start(machine, monkeypatch) -> None:

@@ -326,12 +326,13 @@ class MCUBus:
         return buf
 
     @classmethod
-    def enumerate_buses(cls, vid=0x2E8A, pid=0x000A) -> list[str]:
-        """Enumerate available serial ports that could be used for the MCU bus. Filtered by VID and PID
+    def enumerate_buses(cls, vid=0x2E8A, pid=None) -> list[str]:
+        """Enumerate Pico SDK USB serial ports that could host SorterInterface.
 
         Args:
             vid: The USB Vendor ID to filter by (default 0x2e8a, Raspberry Pi Foundation)
-            pid: The USB Product ID to filter by (default 0x000a, Pico SDK CDC UART)
+            pid: Optional USB Product ID override. By default accept both Pico
+                SDK CDC UART IDs (0x0009 and 0x000A).
 
         Returns:
             A list of serial port names (e.g. ["/dev/ttyUSB0", "/dev/ttyUSB1"])
@@ -339,7 +340,8 @@ class MCUBus:
         import serial.tools.list_ports
 
         ports = serial.tools.list_ports.comports()
-        return [port.device for port in ports if port.vid == vid and port.pid == pid]
+        accepted_pids = {pid} if pid is not None else {0x0009, 0x000A}
+        return [port.device for port in ports if port.vid == vid and port.pid in accepted_pids]
 
     def scan_devices(self, min_address=0, max_address=15) -> list[int]:
         """Scan the bus for devices by sending a ping command to each address in the specified range.

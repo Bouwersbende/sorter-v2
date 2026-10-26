@@ -292,15 +292,43 @@ def test_nothing_is_late_while_the_channel_waits_for_a_piece() -> None:
 # ---------------------------------------------- turns keep waiting pieces on
 
 
+def test_ready_head_ejects_alone_before_a_drop_piece_is_staged() -> None:
+    ch, _ = _channel()
+    now = time.monotonic()
+    obj = _classified()
+    head = _piece(ch, 330, now, gap=10.0, obj=obj)
+    head.placed = True
+    obj.stage = PieceStage.distributing
+    ch.shared.distribution_ready = True
+    _piece(ch, 331, now, gap=190.0, zone=two_piece._ZONE_DROP, obj=_classified())
+
+    ch._maybeStartRotation()
+
+    assert ch._phase == _Phase.EJECTING
+    assert ch._eject_target is head
+    assert ch._stage_target is None
+
+
+def test_an_unready_forward_piece_blocks_staging() -> None:
+    ch, _ = _channel()
+    now = time.monotonic()
+    _piece(ch, 330, now, gap=10.0)
+    _piece(ch, 331, now, gap=190.0, zone=two_piece._ZONE_DROP, obj=_classified())
+
+    ch._maybeStartRotation()
+
+    assert ch._phase == _Phase.WAITING
+    assert ch._stage_target is None
+
+
 def test_the_eject_turn_stops_short_of_dropping_the_piece_behind() -> None:
-    """Ejecting a piece at the exit with a turn sized to stage the
-    next one carried the classified piece waiting in between off as well."""
+    """Ejecting the head never extends the turn to stage another piece."""
     ch, moves = _channel()
     now = time.monotonic()
     target = _piece(ch, 336, now, gap=10.0, zone=two_piece._ZONE_EXIT, obj=_classified())
     waiting = _piece(ch, 335, now, gap=83.0, obj=_classified("3001"))
-    staged = _piece(ch, 337, now, gap=194.0, zone=two_piece._ZONE_DROP, obj=_classified())
-    ch._eject_target, ch._stage_target = target, staged
+    _piece(ch, 337, now, gap=194.0, zone=two_piece._ZONE_DROP, obj=_classified())
+    ch._eject_target, ch._stage_target = target, None
     ch._phase, ch._phase_started_at = _Phase.EJECTING, now
     state = SimpleNamespace(
         exit_com_forward_to_center_deg=12.0,
@@ -314,7 +342,45 @@ def test_the_eject_turn_stops_short_of_dropping_the_piece_behind() -> None:
 
     assert len(moves) == 1
     room = waiting.gap_to_exit - two_piece._KEEP_ON_MIN_GAP_DEG
-    assert moves[0] == C4_TRAVEL_SIGN * room
+    assert abs(moves[0]) == 12.0
+    assert abs(moves[0]) < room
+
+
+def test_eject_does_not_count_a_piece_still_visible_after_timeout() -> None:
+    ch, moves = _channel()
+    now = time.monotonic()
+    target = _piece(ch, 338, now, gap=10.0, zone=two_piece._ZONE_EXIT, obj=_classified())
+    ch._eject_target = target
+    ch._phase = _Phase.EJECTING
+    ch._phase_started_at = now - two_piece._EJECT_TIMEOUT_S - 1.0
+
+    ch._ejecting(SimpleNamespace(), True, now)
+
+    assert not target.ejected
+    assert ch._eject_target is target
+    assert ch._phase == _Phase.EJECTING
+    assert moves == []
+    assert [p["kind"] for p in target.known_object.problems] == ["eject_timeout"]
+    ch._ejecting(SimpleNamespace(), True, now)
+    assert len(target.known_object.problems) == 1
+
+
+def test_eject_move_respects_the_waiting_pieces_clearance() -> None:
+    ch, moves = _channel()
+    now = time.monotonic()
+    target = _piece(ch, 338, now, gap=10.0, zone=two_piece._ZONE_EXIT, obj=_classified())
+    _piece(ch, 339, now, gap=33.0, obj=_classified())
+    ch._eject_target = target
+    ch._phase = _Phase.EJECTING
+    ch._phase_started_at = now
+    state = SimpleNamespace(
+        exit_com_forward_to_center_deg=20.0,
+        pieces=(SimpleNamespace(com_forward_to_exit_deg=10.0),),
+    )
+
+    ch._ejecting(state, True, now)
+
+    assert moves == [C4_TRAVEL_SIGN * 8.0]
 
 
 def test_the_eject_turn_is_sized_for_the_target_not_the_leading_box() -> None:
@@ -361,7 +427,6 @@ def test_the_head_goes_alone_when_a_straddling_piece_keeps_the_gate_shut() -> No
     obj.stage = PieceStage.distributing
     ch.shared.distribution_ready = True
     ch._ready_since = None
-    ch._phase_started_at = now - two_piece._HEAD_ALONE_AFTER_S - 1.0
     ch._maybeStartRotation()
     assert ch._phase == _Phase.EJECTING and ch._eject_target is head
 

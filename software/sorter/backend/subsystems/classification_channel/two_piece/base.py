@@ -1040,7 +1040,7 @@ class Rev01BaseState(BaseState):
             if obj.too_big:
                 self.gc.logger.info(
                     f"piece {obj.uuid} part {obj.part_id} is oversize "
-                    f"({max_dim:.1f}mm > {OVERSIZE_MAX_DIMENSION_MM}mm) -> misc bottom bin"
+                    f"({max_dim:.1f}mm > {OVERSIZE_MAX_DIMENSION_MM}mm) -> physical discard if it fits"
                 )
         except Exception as exc:
             self.gc.logger.warn(f"hive piece metadata lookup failed: {exc}")

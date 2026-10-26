@@ -144,9 +144,9 @@ def _addPiece(
 # ------------------------------------------------------------------ distribution
 
 
-def test_positioning_records_the_piece_it_aims_for() -> None:
+def test_positioning_holds_oversize_without_discard_bin() -> None:
     piece = KnownObject(part_id="3001", color_id="1")
-    piece.too_big = True  # the oversize passthrough reaches READY without a profile or layout
+    piece.too_big = True
     shared = SharedVariables()
     shared.transport = SimpleNamespace(getPieceForDistributionPositioning=lambda: piece)
     layout = SimpleNamespace(layers=[])
@@ -160,7 +160,7 @@ def test_positioning_records_the_piece_it_aims_for() -> None:
         queue.Queue(),
     )
 
-    assert positioning.step() == DistributionState.READY
+    assert positioning.step() == DistributionState.IDLE
     assert shared.distribution_positioned_uuid == piece.uuid
 
 
@@ -347,12 +347,13 @@ def test_stall_auto_clear_commits_a_placed_head_whose_chute_is_aimed() -> None:
     ch = _mkChannel(transport, shared)
     obj = _positioned(transport, shared)
     _addPiece(ch, 3, gap_to_exit=20.0, obj=obj, placed=True)
-    cleared = SimpleNamespace(cleared=True, output_deg_moved=144.0, reason="cleared")
+    cleared = SimpleNamespace(cleared=True, output_deg_moved=144.0, reason="cleared", destination_bin=(0, 5, 1))
 
     with patch.object(two_piece, "clearChannelByAdvancing", return_value=cleared):
         ch.attemptStallAutoClear(max_output_deg=720.0)
 
     assert transport.getPieceForDistributionDrop() is obj
+    assert obj.destination_bin == (0, 5, 1)
     assert transport.getPieceForDistributionPositioning() is None
     assert _c4(ch)["exit_count"] == 1  # swept into the chute: a C4 exit
 
@@ -445,8 +446,5 @@ def test_a_ready_head_goes_out_alone_when_no_next_piece_comes() -> None:
     shared.set_distribution_gate(True, reason=None)
     head = _addPiece(ch, 7, gap_to_exit=40.0, obj=obj, placed=True)
     ch._ready_since = time.monotonic() - 5.0
-    ch._maybeStartRotation()
-    assert ch._phase == _Phase.WAITING  # a next piece may still come
-    ch._ready_since = time.monotonic() - two_piece._HEAD_ALONE_AFTER_S - 1.0
     ch._maybeStartRotation()
     assert ch._phase == _Phase.EJECTING and ch._eject_target is head and ch._stage_target is None

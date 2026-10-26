@@ -1,6 +1,6 @@
 import contextlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 # The one feeder flow and the one classification-channel flow every machine
@@ -42,7 +42,7 @@ from .parse_user_toml import (
 from hardware_settings.chute import boardDefaults, readChuteSettings
 from hardware_settings.motors import MOTORS, Motor, motorSockets
 from hardware_settings.servos import applyServoSpeeds, readServoSpeeds
-from hardware_settings.steppers import StepperSettings, applyStepperSettings, readStepperSettings
+from hardware_settings.steppers import StepperSettings, applyStepperSettings, driverUartEnabled, readStepperSettings
 from .leds import LedController, discoverLedOutputs
 from bin_layout_store import get_bin_categories, get_not_in_inventory_bins
 from local_state import get_led_state, get_servo_states
@@ -107,6 +107,8 @@ def _configureStepper(
     motor: Motor,
     stepper_config: "StepperConfig | None",
     settings: StepperSettings,
+    *,
+    driver_uart: bool = True,
 ) -> None:
     """Write every driver setting the motor has saved (or its defaults), and its
     speed limits and acceleration, the same way a live change does
@@ -120,7 +122,7 @@ def _configureStepper(
 
     Without motor power (NO_POWER_DEVELOPMENT_MODE) the drivers cannot answer,
     so the writes go out unchecked."""
-    verify = not gc.no_power_development_mode
+    verify = driver_uart and not gc.no_power_development_mode
 
     def run(action: str, command):
         if action == "arm stall detection" and "stallguard" not in settings.saved:
@@ -131,7 +133,13 @@ def _configureStepper(
         return run("read its driver", lambda: stepper.read_driver_register(_TMC_REG_IFCNT)) & 0xFF
 
     before = interfaceCount() if verify else 0
-    writes = applyStepperSettings(stepper, settings, run=run)
+    # The older machine's external STEP/DIR chute driver has no TMC UART
+    # return path. Keep its motion scale, current command and GCONF setup, but
+    # do not read IFCNT or arm StallGuard on that explicitly configured motor.
+    fields = None if driver_uart else ("stealthchop", "microsteps", "irun", "inverted")
+    writes = applyStepperSettings(stepper, settings, fields=fields, run=run)
+    if not driver_uart:
+        stepper.stallguard_enabled = False
     if stepper_config is not None:
         speed = stepper_config.default_steps_per_second
         acceleration = stepper_config.acceleration_microsteps_per_second_sq
@@ -150,10 +158,16 @@ def _configureStepper(
                 f"was sent, so it would run at the wrong current or microstepping. "
                 f"Check the driver's connection. {_CHECK_POWER}",
             )
-    gc.logger.info(
-        f"Stepper '{motor.label}' configured: {settings.describe()}"
-        + (f"; driver took {writes} writes" if verify else "; unchecked (no motor power)")
+    if verify:
+        verification = f"driver took {writes} writes"
+    elif not driver_uart:
+        verification = "external STEP/DIR driver (no UART readback or StallGuard)"
+    else:
+        verification = "unchecked (no motor power)"
+    described_settings = settings if driver_uart else replace(
+        settings, stallguard=False, stallguard_auto=False, coolstep=False,
     )
+    gc.logger.info(f"Stepper '{motor.label}' configured: {described_settings.describe()}; {verification}")
 
 
 def restore_servo_states(servos: list, gc: GlobalConfig) -> None:
@@ -1070,6 +1084,7 @@ def _bindHardware(irl_interface: IRLInterface, config: IRLConfig, gc: GlobalConf
             motor,
             stepper_config,
             readStepperSettings(motor, machine_specific_params, gc.logger),
+            driver_uart=driverUartEnabled(motor, machine_specific_params, gc.logger),
         )
 
         setattr(irl_interface, motor.attr, stepper)
@@ -1095,6 +1110,16 @@ def _bindHardware(irl_interface: IRLInterface, config: IRLConfig, gc: GlobalConf
 
     bin_layout = config.bin_layout_config
     irl_interface.distribution_layout = mkLayoutFromConfig(bin_layout)
+
+    if getattr(gc, "fixed_closed_single_layer", False):
+        from .bin_layout import fixedClosedSingleLayerReady
+
+        if not fixedClosedSingleLayerReady(irl_interface.distribution_layout):
+            raise HardwareFault(
+                "Fixed flap layout invalid",
+                "Fixed closed flap mode requires only layer 1 enabled. Disable all lower layers before homing.",
+            )
+        gc.logger.info("Fixed closed layer 1: no servo controller; chute remains active")
 
     from .bin_layout import calibratedAnglesForLayer
 

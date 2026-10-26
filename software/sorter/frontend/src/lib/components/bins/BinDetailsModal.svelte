@@ -68,7 +68,7 @@
 
 	function availableCategories(): { id: string; name: string }[] {
 		const cats = sortingProfileStore.data?.categories ?? {};
-		return Object.entries(cats)
+		return [...Object.entries(cats), ...('misc' in cats ? [] : [['misc', { name: 'Discard / unknown' }] as const])]
 			.map(([id, cat]) => ({ id, name: cat?.name ?? id }))
 			.sort((a, b) => a.name.localeCompare(b.name));
 	}
