@@ -105,7 +105,17 @@ def openIncident(payload: dict[str, Any], *, run_id: Optional[str] = None) -> in
             ),
         )
         conn.commit()
-        return int(cur.lastrowid or 0)
+        incident_id = int(cur.lastrowid or 0)
+    try:
+        import machine_investigation
+
+        machine_investigation.record_event("incident_opened", {
+            "incident_id": incident_id, "kind": payload.get("kind"),
+            "severity": payload.get("severity"), "reason": payload.get("reason"),
+        }, piece_uuid=payload.get("piece_uuid"), run_id=run_id, at=triggered_at)
+    except Exception:
+        pass
+    return incident_id
 
 
 def updateIncident(row_id: int, payload: dict[str, Any]) -> None:

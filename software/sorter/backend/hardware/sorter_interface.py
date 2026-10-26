@@ -161,6 +161,12 @@ def _controlDataRecordCommand(payload: dict) -> None:
         control_data_store.record(payload)
     except Exception:
         pass
+    try:
+        import machine_investigation
+
+        machine_investigation.record_motor_command(dict(payload))
+    except Exception:
+        pass
 
 
 @dataclass(frozen=True)
@@ -256,6 +262,7 @@ class StepperMotor:
             f"inverted={self._direction_inverted}"
         )
         payload = struct.pack("<i", physical_steps) # 4 bytes, little-endian signed integer
+        position_before = self._current_position_steps
         sent_mono = time.monotonic()
         self.last_commanded_at = sent_mono
         self.running_at_speed = False
@@ -278,6 +285,13 @@ class StepperMotor:
                 "cmd": "move_steps",
                 "stepper": self._name,
                 "steps": steps,
+                "physical_steps": physical_steps,
+                "payload_hex": payload.hex(),
+                "controller_reply_hex": bytes(res.payload).hex(),
+                "channel": self._channel,
+                "position_before_steps": position_before,
+                "position_estimated_after_steps": self._current_position_steps,
+                "max_speed": max_speed if success else (self._applied_speed_limits[1] if self._applied_speed_limits else None),
                 "deg": round(self.degrees_for_microsteps(steps), 3),
                 "accel": self._applied_acceleration,
                 "success": success,

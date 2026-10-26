@@ -439,6 +439,11 @@ class Rev01BaseState(BaseState):
                     [s.bgr for s in req.images],
                     piece_uuid=piece_uuid,
                     dump_label=req.label,
+                    source_images=[{
+                        "captured_at": s.rec.created_at or s.rec.ts,
+                        "channel": s.rec.channel,
+                        "source": s.rec.source,
+                    } for s in req.images],
                 )
                 out[i] = (req, result if isinstance(result, dict) else None, None, time.monotonic() - t0)
             except Exception as exc:
@@ -866,6 +871,19 @@ class Rev01BaseState(BaseState):
     def _recordPredictions(self, obj) -> None:
         # Every ranked answer this piece got, applied or not, kept and sent to
         # Hive. Runs on the control loop, so the write goes to the writer thread.
+        import machine_investigation
+
+        machine_investigation.record_event("classification_decision", {
+            "part_id": obj.part_id,
+            "color_id": obj.color_id,
+            "category_id": obj.category_id,
+            "status": obj.classification_status.value,
+            "strategy": str(obj.classification_strategy),
+            "mold_provider": obj.mold_provider,
+            "color_provider": obj.color_provider,
+            "confidence": obj.confidence,
+            "color_confidence": obj.color_confidence,
+        }, piece_uuid=obj.uuid, at=obj.classified_at)
         predictions = piece_predictions.fromClassification(
             attempts=obj.classification_attempts,
             hosted=self.ctx.hosted_prediction,

@@ -40,6 +40,29 @@
 	let savingAssign = $state(false);
 	let assignDropdownOpen = $state(false);
 	let seededKey: string | null = null;
+	let binPieces = $state<Array<{ piece_uuid: string; part_id: string | null; color_id: string | null; category_id: string | null; classification_status: string | null; distributed_at: number }>>([]);
+	let binPiecesLoading = $state(false);
+	let selectedGroup = $state<{ part_id: string | null; color_id: string | null; category_id: string | null; classification_status: string | null } | null>(null);
+	const visibleBinPieces = $derived.by(() => {
+		const group = selectedGroup;
+		return group
+			? binPieces.filter((piece) => piece.part_id === group.part_id && piece.color_id === group.color_id && piece.category_id === group.category_id && piece.classification_status === group.classification_status)
+			: binPieces;
+	});
+
+	async function loadBinPieces(layer: number, section: number, bin: number) {
+		binPiecesLoading = true;
+		binPieces = [];
+		try {
+			const response = await fetch(`${baseUrl}/api/machine-investigation/bins/${layer}/${section}/${bin}/pieces`);
+			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			binPieces = (await response.json()).pieces ?? [];
+		} catch {
+			// The grouped bin totals remain available if the investigation endpoint is unavailable.
+		} finally {
+			binPiecesLoading = false;
+		}
+	}
 
 	$effect(() => {
 		if (!open || !detailsBin) {
@@ -52,6 +75,8 @@
 		assignSelected = [...detailsBin.bin.category_ids];
 		assignSearch = '';
 		assignDropdownOpen = false;
+		selectedGroup = null;
+		void loadBinPieces(detailsBin.layerIndex, detailsBin.bin.section_index, detailsBin.bin.bin_index);
 	});
 
 	const setMeta = $derived.by((): SetMeta | null => {
@@ -296,7 +321,7 @@
 			{:else}
 				<div class="grid grid-cols-3 gap-3 sm:grid-cols-4 lg:grid-cols-5">
 					{#each detailsBin.contents.items as item}
-						<div class="overflow-hidden rounded-control">
+						<button type="button" class="overflow-hidden rounded-control text-left hover:bg-hover" onclick={() => selectedGroup = { part_id: item.part_id ?? null, color_id: item.color_id ?? null, category_id: item.category_id ?? null, classification_status: item.classification_status ?? null }}>
 							<div class="relative p-2">
 								<div class="h-24 w-full">
 									<PieceThumb src={previewUrl(item)} alt={pieceTooltip(item)} fallbackText={item.part_id ?? '?'} />
@@ -313,10 +338,27 @@
 								<div class="mt-1 text-ink-muted">{itemSecondaryText(item)}</div>
 								<div class="mt-1 text-ink-muted">{formatCategoryName(item.category_id) || 'No category'}</div>
 							</div>
-						</div>
+						</button>
 					{/each}
 				</div>
 			{/if}
+			<div class="mt-5">
+				<h3 class="text-sm font-semibold">Individual piece records</h3>
+				<p class="mt-1 text-sm text-ink-muted">Select a type above to filter. A recorded destination does not confirm the piece physically landed here.</p>
+				{#if binPiecesLoading}
+					<p class="mt-2 text-sm text-ink-muted">Loading pieces…</p>
+				{:else if visibleBinPieces.length === 0}
+					<p class="mt-2 text-sm text-ink-muted">No individual records are available for this bin.</p>
+				{:else}
+					<div class="mt-2 max-h-64 overflow-y-auto divide-y divide-line">
+						{#each visibleBinPieces as piece (piece.piece_uuid)}
+							<a href={`/machine-investigation?piece=${encodeURIComponent(piece.piece_uuid)}`} class="block py-2 text-sm text-primary-ink hover:bg-hover">
+								{piece.part_id ?? 'Unknown part'} · {piece.color_id ?? 'Unknown color'} · {new Date(piece.distributed_at * 1000).toLocaleString()}
+							</a>
+						{/each}
+					</div>
+				{/if}
+			</div>
 		</div>
 	{/if}
 </Modal>

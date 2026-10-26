@@ -120,6 +120,7 @@ class Positioning(BaseState):
                 return DistributionState.IDLE
             self.shared.distribution_positioned_uuid = piece.uuid
 
+            route_explanation = None
             if piece.too_big:
                 category_id = MISC_CATEGORY
                 self.logger.info(
@@ -128,8 +129,12 @@ class Positioning(BaseState):
                 )
             elif piece.part_id is not None:
                 category_id = self.sorting_profile.getCategoryIdForPart(piece.part_id, piece.color_id)
+                explain_route = getattr(self.sorting_profile, "routeExplanation", None)
+                if callable(explain_route):
+                    route_explanation = explain_route(piece.part_id, piece.color_id)
             else:
                 category_id = MISC_CATEGORY
+            original_category_id = category_id
             # High-value override: a piece whose Hive moving-average price
             # clears the profile's high_value_routing threshold is rerouted into
             # the configured category (e.g. Yellow/Orange Tiles), so it lands in
@@ -272,6 +277,19 @@ class Positioning(BaseState):
                 address.section_index,
                 address.bin_index,
             )
+            import machine_investigation
+
+            machine_investigation.record_event("routing_decision", {
+                "profile_artifact_hash": getattr(self.sorting_profile, "artifact_hash", None),
+                "profile_rule_result": original_category_id,
+                "matched_rule": route_explanation,
+                "final_category_id": category_id,
+                "destination_bin": list(piece.destination_bin),
+                "too_big": bool(piece.too_big),
+                "high_value_routed": bool(piece.high_value_routed),
+                "not_in_inventory": piece.not_in_inventory,
+                "physical_bin_confirmation": None,
+            }, piece_uuid=piece.uuid, at=piece.distributing_at)
             piece.updated_at = time.time()
             self._piece = piece
             self.event_queue.put(knownObjectToEvent(piece))
@@ -306,6 +324,16 @@ class Positioning(BaseState):
             if not chute_stopped or not servo_stopped:
                 return None
             self.shared.set_chute_motion(False, target_bin=self._target_address)
+            if self._piece is not None:
+                import machine_investigation
+
+                machine_investigation.record_event("chute_reported_stopped", {
+                    "software_estimated_angle_deg": self.chute.current_angle,
+                    "physical_position_deg": None,
+                    "controller_reports_stopped": chute_stopped,
+                    "target_bin": [self._target_address.layer_index, self._target_address.section_index,
+                                   self._target_address.bin_index] if self._target_address else None,
+                }, piece_uuid=self._piece.uuid)
             if self._piece is not None and self._piece.distribution_positioned_at is None:
                 self._piece.distribution_positioned_at = time.time()
             move_ms = (now - self._moving_started_at) * 1000
@@ -323,7 +351,10 @@ class Positioning(BaseState):
         self.shared.set_chute_motion(True, target_bin=self._target_address)
         if self._piece is not None and self._piece.distribution_motion_started_at is None:
             self._piece.distribution_motion_started_at = time.time()
-        estimated_ms = self.chute.moveToBin(self._target_address)
+        import machine_investigation
+
+        with machine_investigation.piece_scope(self._piece.uuid if self._piece is not None else None):
+            estimated_ms = self.chute.moveToBin(self._target_address)
         if estimated_ms is None:
             # The board refused the move because the chute was still moving.
             # Sending it again once the chute stops keeps the piece from
